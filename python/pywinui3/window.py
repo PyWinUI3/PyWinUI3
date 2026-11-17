@@ -35,7 +35,7 @@ class Window(Widget):
 
         win = ui.Window(title="工具", layout="grid", scroll=False,
                         rows=["*"], columns=["auto", "*"])
-        side = ui.ListBox(win, width=220, auto_collapse=True, collapsed_width=56)
+        side = ui.ListBox(win, width=220, auto_collapse=True, collapsed_width=40)
         side.grid(row=0, column=0)
     """
 

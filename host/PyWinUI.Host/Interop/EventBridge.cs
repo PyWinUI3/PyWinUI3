@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using PyWinUI.Host.Protocol;
+using PyWinUI.Host.Rendering;
 using Windows.Media.Playback;
 using Windows.System;
 
@@ -26,6 +27,8 @@ internal sealed class EventBridge
 {
     private readonly Action<string, string, JsonObject?, bool> _emit;
     private readonly Action<string> _warn;
+    private readonly Func<DependencyObject, string?>? _resolveId;
+    private readonly Func<string, FrameworkElement?>? _resolveOwner;
     private readonly HashSet<FrameworkElement> _suppressed = new();
 
     /// <summary>已经挂过处理器的 (节点, 事件) 组合，避免重复订阅。</summary>
@@ -35,10 +38,18 @@ internal sealed class EventBridge
     private readonly HashSet<(string NodeId, string EventName)> _boundWindow = new();
 
     /// <param name="emit">参数依次为 nodeId、事件名、数据、是否回声。</param>
-    public EventBridge(Action<string, string, JsonObject?, bool> emit, Action<string> warn)
+    /// <param name="resolveId">把子元素反查成节点 id，用于标签关闭这类「事件属于子节点」的场景。</param>
+    /// <param name="resolveOwner">按节点 id 取协议层的父元素，用于标签选中这类需要父容器事件的场景。</param>
+    public EventBridge(
+        Action<string, string, JsonObject?, bool> emit,
+        Action<string> warn,
+        Func<DependencyObject, string?>? resolveId = null,
+        Func<string, FrameworkElement?>? resolveOwner = null)
     {
         _emit = emit;
         _warn = warn;
+        _resolveId = resolveId;
+        _resolveOwner = resolveOwner;
     }
 
     // ------------------------------------------------------------------
@@ -48,6 +59,10 @@ internal sealed class EventBridge
     public void BeginSuppress(FrameworkElement element) => _suppressed.Add(element);
 
     public void EndSuppress(FrameworkElement element) => _suppressed.Remove(element);
+
+    /// <summary>这个 (节点, 事件) 是否已经订阅过。</summary>
+    public bool IsBound(string nodeId, string eventName) =>
+        _bound.Contains((nodeId, eventName));
 
     // ------------------------------------------------------------------
     // 绑定
@@ -281,16 +296,35 @@ internal sealed class EventBridge
                 BindWebView2Navigation(element, nodeId, eventName, Raise);
                 break;
 
+            // 这些挂在 CoreWebView2 上，由 WebView2Support 统一挂一次；
+            // 这里只登记「Python 订阅了」，没订阅就不往管道推。
+            case "webMessage":
+            case "contentLoading":
+            case "domContentLoaded":
+            case "processFailed":
+            case "newWindowRequested":
+            case "downloadStarting":
+            case "downloadProgress":
+            case "downloadStateChanged":
+                if (element is WebView2 coreEventWeb)
+                {
+                    WebView2Support.Subscribe(coreEventWeb, eventName);
+                }
+
+                break;
+
             // 这几个事件的订阅时机不在绑定阶段：menu 由 contextMenu 的菜单项自行回传，
             // imageFailed 跟着 BitmapImage 的加载走，scriptResult 是脚本 invoke 的异步回执。
             // 这里认下名字，免得刷「未知事件」。
             case "menu":
             case "imageFailed":
             case "scriptResult":
+            // AutoCollapse 自己回传展开状态，不需要在这里订阅
+            case "openChanged":
                 break;
 
             default:
-                if (!ExtendedEvents.TryBind(element, eventName, Raise))
+                if (!ExtendedEvents.TryBind(element, nodeId, eventName, Raise, _resolveId, _resolveOwner))
                 {
                     _warn($"节点 {nodeId}: 未知事件 \"{eventName}\"");
                 }

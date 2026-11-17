@@ -75,6 +75,9 @@ class Widget:
         self._handler_ids: dict[str, str] = {}
         self._destroyed = False
         self._variable: Any = None
+        # 宽度动画的代次。新动画一开就作废旧链，否则快速反复悬停会有
+        # 多条 step 链同时读写 width，表现为抖动。
+        self._anim_gen = 0
 
         # command 是 tkinter 的惯用写法，映射到 click 事件
         command = kwargs.pop("command", None)
@@ -401,39 +404,55 @@ class Widget:
         """设置鼠标悬停提示，``None`` 清除。"""
         self.configure(tooltip=text)
 
+    def micro(
+        self,
+        program: list[dict[str, Any]],
+        *,
+        notify: bool = False,
+    ) -> str:
+        """把一小段受限指令交给宿主在 UI 线程内执行，返回请求 id。
+
+        指令集见 :func:`pywinui3.protocol.micro`。典型用途是把「每帧发一条
+        patch」的动画改成宿主内一次性跑完，全程零往返。
+        """
+        return self._app.micro(self._id, program, notify=notify)
+
     def animate_width(
         self,
         target: float,
         *,
         steps: int = ANIM_STEPS,
         interval: int = ANIM_INTERVAL,
-    ) -> None:
+    ) -> str:
         """把宽度按 ``steps`` 步指数缓出动画到 ``target``。
 
-        每一步都算 ``w += (end_w - w) / 3`` 并**立刻赋值**，所以界面是一帧帧
-        收到新宽度的，不是等算完再跳过去。
-
-        最后一步直接取 ``target``：``(2/3)^20`` 还剩 0.03% 的零头，
-        不 snap 的话宽度永远差一点。
+        旧实现每一步都发一条 patch（20 步 = 20 次跨进程往返 + 20 条 ack），
+        现在整段补间作为一条 ``micro`` 指令交给宿主在 UI 线程跑完：
+        **1 条消息、0 条回执**，曲线与旧版一致（``w += (end-w)/3``），
+        最后一步 snap 到目标值。宿主按节点管理代次，新的动画会自动
+        顶掉同一控件上还没跑完的旧动画。
 
         ::
 
             side.animate_width(56)     # 收起
             side.animate_width(200)    # 展开
         """
-        start = float(getattr(self, "width", 0) or 0)
-        if abs(target - start) < 0.5:
-            self.width = target
-            return
-
-        def step(left: int) -> None:
-            current = float(getattr(self, "width", 0) or 0)
-            value = target if left == 1 else current + (target - current) / 3
-            self.width = round(value, 1)
-            if left > 1:
-                self._app.after(interval, lambda: step(left - 1))
-
-        step(steps)
+        # 本地状态直接记终值：动画过程由宿主负责，Python 侧不再逐帧写。
+        # 不发 patch —— 否则又把 20 步往返请回来了。
+        self._props["width"] = float(target)
+        return self._app.micro(
+            self._id,
+            [
+                {
+                    "i": "animate",
+                    "prop": "width",
+                    "to": float(target),
+                    "ms": max(1, steps * interval),
+                    "steps": max(1, steps),
+                    "divisor": 3,
+                }
+            ],
+        )
 
     def set_menu(self, items: list[Any] | None) -> None:
         """设置右键菜单。
@@ -942,15 +961,19 @@ class ListBox(Widget):
     - 点中某一项 → 钉住，鼠标移开也保持展开
     - 点内容区 → 调 ``release()`` 取消钉住并收起
 
-    展开/收起都是 20 步指数缓出动画（``w += (end_w - w) / 3``）。
-    折叠只改宽度，所以构造时必须给一个大于 ``collapsed_width`` 的 ``width``。
+    折叠逻辑**全部在宿主侧**（``AutoCollapse.cs``）：100 步指数宽度动画
+    （``w += (end_w - w) / 3``）、收起只切文字 ``Visibility`` 不动 ``ItemsSource``、
+    指针事件用 ``AddHandler(handledEventsToo: true)`` 绕过 ListViewItem 吞事件。
+    Python 侧只负责下发参数和转发 ``set_open`` / ``release``。
+
+    构造时必须给一个大于 ``collapsed_width`` 的 ``width``，否则没有「展开态」。
 
     ::
 
         nav = ui.ListBox(win, [
             {"text": "概览", "glyph": "\\uE80F"},
             {"text": "设置", "glyph": "\\uE713"},
-        ], width=200, auto_collapse=True, collapsed_width=56)
+        ], width=200, auto_collapse=True, collapsed_width=40)
 
         body.bind("pointerPressed", lambda e: nav.release())
     """
@@ -963,7 +986,7 @@ class ListBox(Widget):
         items: list[str] | None = None,
         *,
         auto_collapse: bool = False,
-        collapsed_width: int = 56,
+        collapsed_width: int = 40,
         hover_expand: bool = True,
         pin_on_select: bool = True,
         expanded: bool | None = None,
@@ -977,24 +1000,41 @@ class ListBox(Widget):
         if auto_collapse and not start_open and expanded_width:
             kwargs["width"] = collapsed_width
 
-        super().__init__(master, items=items or [], **kwargs)
+        props: dict[str, Any] = {
+            "items": list(items or []),
+            "auto_collapse": auto_collapse,
+            "collapsed_width": collapsed_width,
+            "hover_expand": hover_expand,
+            "pin_on_select": pin_on_select,
+            "open": start_open,
+        }
+        # 0 表示「没给展开宽度」，此时宿主回落到元素自身的 Width。
+        # 直接下发 0 会让宿主判定 expanded <= collapsed 而拒绝挂载。
+        if expanded_width > 0:
+            props["expanded_width"] = expanded_width
+
+        super().__init__(master, **props, **kwargs)
 
         self._auto_collapse = auto_collapse
         self._collapsed_width = collapsed_width
         self._expanded_width = expanded_width
         self._hover_expand = hover_expand
         self._pin_on_select = pin_on_select
-        self._raw_items = list(items or [])
-        self._pinned = False
         self._opened = start_open
+        self._pinned = False
 
-        if auto_collapse and hover_expand:
-            self.bind("pointerEntered", lambda e: self.set_open(True))
-            self.bind("pointerExited", lambda e: self._collapse_unless_pinned())
+        if auto_collapse:
+            # 常驻订阅：宿主每次展开/收起都会回一条，用来同步 is_open。
+            # 空回调只占事件名，真正的同步写在 _sync_from_event（echo 也执行）。
+            self.bind("openChanged", lambda _event: None)
 
-        if auto_collapse and not self._opened:
-            # 一开始就是窄条，文字先收起来，否则能看到半截汉字
-            self._render_items(collapsed=True)
+    def _sync_from_event(self, event: Any) -> None:
+        if event.name == "openChanged":
+            if "open" in event.data:
+                self._opened = bool(event.data["open"])
+            if "pinned" in event.data:
+                self._pinned = bool(event.data["pinned"])
+        super()._sync_from_event(event)
 
     @property
     def selected_index(self) -> int:
@@ -1008,31 +1048,16 @@ class ListBox(Widget):
 
     @property
     def is_open(self) -> bool:
+        """最近一次宿主回报的展开状态（本地缓存）。"""
         return self._opened
 
     @property
     def is_pinned(self) -> bool:
+        """是否因为选中某一项而保持展开。"""
         return self._pinned
 
-    def _on_event(self, event: Any) -> None:
-        # 用户点了某一项就钉住；echo 事件是程序设的选中，不算
-        if self._auto_collapse and self._pin_on_select and event.name == "change":
-            self._pinned = True
-
-    def _collapse_unless_pinned(self) -> None:
-        if not self._pinned:
-            self.set_open(False)
-
-    def release(self) -> None:
-        """取消钉住并收起。点内容区时调它。"""
-        self._pinned = False
-        self.set_open(False)
-
-    def toggle(self) -> None:
-        self.set_open(not self._opened)
-
     def set_open(self, opened: bool) -> None:
-        if not self._auto_collapse or opened == self._opened:
+        if not self._auto_collapse or bool(opened) == self._opened:
             return
 
         if self._expanded_width <= self._collapsed_width:
@@ -1041,44 +1066,19 @@ class ListBox(Widget):
                 f"当前 width={self._expanded_width}，collapsed_width={self._collapsed_width}"
             )
 
-        self._opened = opened
-        if opened:
-            # 先把文字放回去，展开过程中标题就是完整的
-            self._render_items(collapsed=False)
-            self.animate_width(self._expanded_width)
-        else:
-            self.animate_width(self._collapsed_width)
-            # 收完再抹掉文字：只改宽度的话汉字会被裁成半个，很难看
-            self._app.after(
-                ANIM_STEPS * ANIM_INTERVAL,
-                lambda: self._render_items(collapsed=True),
-            )
+        self._opened = bool(opened)
+        self._app._send_invoke(self._id, "set_open", {"open": bool(opened)})
 
-    def _render_items(self, *, collapsed: bool) -> None:
-        """折叠时只留图标。
-
-        没有图标的项在折叠态会变成空白条，所以只要有一项缺 glyph，
-        就整体保持原样，让宽度去裁——总比一排空按钮好。
-        """
-        if not self._raw_items:
+    def release(self) -> None:
+        """取消钉住并收起。点内容区时调它。"""
+        if not self._auto_collapse:
             return
-        if collapsed and not all(_item_glyph(item) for item in self._raw_items):
-            return
+        self._pinned = False
+        self._opened = False
+        self._app._send_invoke(self._id, "release")
 
-        index = self.selected_index
-        rendered: list[Any] = []
-        for item in self._raw_items:
-            text, glyph = _item_text(item), _item_glyph(item)
-            if glyph:
-                rendered.append({"text": "" if collapsed else text, "glyph": glyph})
-            else:
-                rendered.append("" if collapsed else text)
-
-        self.configure(items=rendered)
-
-        # ItemsSource 换掉会清空选中，按原索引选回来
-        if index >= 0:
-            self.configure(selectedIndex=index)
+    def toggle(self) -> None:
+        self.set_open(not self._opened)
 
 
 class Image(Widget):
@@ -1230,6 +1230,17 @@ class Separator(Widget):
         super().__init__(master, **kwargs)
 
 
+#: WebView2 设置的 snake_case → 协议 camelCase 映射（不是简单下划线转换）
+_WEBVIEW2_SETTINGS = {
+    "muted": "isMuted",
+    "user_agent": "userAgent",
+    "script_enabled": "isScriptEnabled",
+    "context_menus_enabled": "areDefaultContextMenusEnabled",
+    "web_message_enabled": "isWebMessageEnabled",
+    "zoom_control_enabled": "isZoomControlEnabled",
+}
+
+
 class WebView2(Widget):
     """WebView2 网页渲染控件。
 
@@ -1259,12 +1270,23 @@ class WebView2(Widget):
 
     _type = "WebView2"
     _URL_EVENTS = frozenset(
-        {"navigationStarting", "navigationCompleted", "sourceChanged"}
+        {
+            "navigationStarting",
+            "navigationCompleted",
+            "sourceChanged",
+            "contentLoading",
+            "domContentLoaded",
+        }
     )
 
     def __init__(self, master: Any, source: str = "", **kwargs: Any):
+        # 设置项的协议名不是下划线直译（muted -> isMuted），先归一化
+        for snake, camel in _WEBVIEW2_SETTINGS.items():
+            if snake in kwargs:
+                kwargs[camel] = kwargs.pop(snake)
         super().__init__(master, source=source, **kwargs)
         self._current_url = str(source)
+        self._script_seq = 0
 
         # 常驻订阅 sourceChanged：宿主看到这个事件名才会去挂 CoreWebView2 的地址监听。
         # 用空回调占住事件名，真正的同步写在 _sync_from_event 里，所以用户之后
@@ -1339,14 +1361,166 @@ class WebView2(Widget):
     def web_title(self) -> str:
         return str(self.query("webTitle") or "")
 
-    def execute_script(self, script: str) -> None:
-        """在页面里执行一段 JavaScript。
+    def execute_script(self, script: str, request_id: str | None = None) -> str:
+        """在页面里执行一段 JavaScript，返回请求 id。
 
         invoke 没有返回值，结果以 ``scriptResult`` 事件回推，
-        用 ``on_script_result()`` 接收；``e.data["result"]`` 是 JSON 字符串，
+        用 ``on_script_result()`` 接收；``e.data["requestId"]`` 与这里返回的 id
+        一致，并发执行多段脚本时不会混淆。``e.data["result"]`` 是 JSON 字符串，
         出错时给 ``e.data["error"]``。
         """
-        self._app._send_invoke(self._id, "execute_script", {"script": str(script)})
+        self._script_seq += 1
+        rid = request_id or f"s{self._script_seq}"
+        self._app._send_invoke(
+            self._id, "execute_script", {"script": str(script), "requestId": rid}
+        )
+        return rid
 
     def on_script_result(self, handler: Callable[..., Any]) -> str:
         return self.bind("scriptResult", handler)
+
+    # ---- 页面 ↔ 宿主消息 ----
+
+    def post_message(self, message: Any) -> None:
+        """宿主 → 页面：字符串走 PostWebMessageAsString，其它值按 JSON 发。"""
+        self._app._send_invoke(self._id, "post_web_message", {"message": message})
+
+    def on_message(self, handler: Callable[..., Any]) -> str:
+        """页面 → 宿主：页面里调用 ``window.chrome.webview.postMessage(...)``。
+
+        ``e.data["data"]`` 是解析后的 JSON 值，``e.data["raw"]`` 是原始 JSON 字符串。
+        """
+        return self.bind("webMessage", handler)
+
+    def on_content_loading(self, handler: Callable[..., Any]) -> str:
+        return self.bind("contentLoading", handler)
+
+    def on_dom_content_loaded(self, handler: Callable[..., Any]) -> str:
+        return self.bind("domContentLoaded", handler)
+
+    def on_process_failed(self, handler: Callable[..., Any]) -> str:
+        """渲染进程崩溃；``e.data`` 含 kind / reason / exitCode。"""
+        return self.bind("processFailed", handler)
+
+    # ---- 新窗口：由 Python 回执决定 ----
+
+    def on_new_window_request(self, handler: Callable[..., Any]) -> str:
+        """页面调用 ``window.open`` 时触发；必须用 :meth:`respond_new_window` 回执。
+
+        ``e.data["requestId"]`` 是回执 id；8 秒不回执按「拒绝」处理。
+        """
+        return self.bind("newWindowRequested", handler)
+
+    def respond_new_window(
+        self, request_id: str, allow: bool, url: str | None = None
+    ) -> None:
+        """允许 = 在**当前视图**导航过去（可另给 url）；拒绝 = 丢弃这次开窗。
+
+        当前模型是单 WebView2，不会真的创建第二个浏览器窗口。
+        """
+        args: dict[str, Any] = {"requestId": str(request_id), "allow": bool(allow)}
+        if url is not None:
+            args["url"] = str(url)
+        self._app._send_invoke(self._id, "respond_new_window", args)
+
+    # ---- 下载：DownloadOperation 生命周期 ----
+
+    def on_download_starting(self, handler: Callable[..., Any]) -> str:
+        """下载开始前触发；用 :meth:`respond_download` 决定是否下载 / 改保存路径。"""
+        return self.bind("downloadStarting", handler)
+
+    def respond_download(
+        self, download_id: str, allow: bool = True, file_path: str | None = None
+    ) -> None:
+        """回执：allow=False 取消；file_path 覆盖默认保存路径；8 秒超时按默认允许。"""
+        args: dict[str, Any] = {"downloadId": str(download_id), "allow": bool(allow)}
+        if file_path is not None:
+            args["filePath"] = str(file_path)
+        self._app._send_invoke(self._id, "respond_download", args)
+
+    def download_action(self, download_id: str, action: str) -> None:
+        """控制下载：``cancel`` / ``pause`` / ``resume``。"""
+        if action not in ("cancel", "pause", "resume"):
+            raise ValueError("action 只能是 cancel / pause / resume")
+        self._app._send_invoke(
+            self._id,
+            "download_action",
+            {"downloadId": str(download_id), "action": action},
+        )
+
+    def cancel_download(self, download_id: str) -> None:
+        self.download_action(download_id, "cancel")
+
+    def pause_download(self, download_id: str) -> None:
+        self.download_action(download_id, "pause")
+
+    def resume_download(self, download_id: str) -> None:
+        self.download_action(download_id, "resume")
+
+    def on_download_progress(self, handler: Callable[..., Any]) -> str:
+        """``e.data`` 含 bytesReceived / totalBytes / state；宿主侧 100ms 节流。"""
+        return self.bind("downloadProgress", handler)
+
+    def on_download_state_changed(self, handler: Callable[..., Any]) -> str:
+        """``e.data`` 含 state / interruptReason / filePath。"""
+        return self.bind("downloadStateChanged", handler)
+
+    # ---- DevTools / 设置 ----
+
+    def open_devtools(self) -> None:
+        self._app._send_invoke(self._id, "open_devtools")
+
+    def _web_setting(self, key: str) -> Any:
+        return self.query(key)
+
+    def _set_web_setting(self, key: str, value: Any) -> None:
+        self.configure(**{key: value})
+
+    @property
+    def muted(self) -> bool:
+        return bool(self._web_setting("isMuted"))
+
+    @muted.setter
+    def muted(self, value: bool) -> None:
+        self._set_web_setting("isMuted", bool(value))
+
+    @property
+    def user_agent(self) -> str:
+        return str(self._web_setting("userAgent") or "")
+
+    @user_agent.setter
+    def user_agent(self, value: str) -> None:
+        self._set_web_setting("userAgent", str(value))
+
+    @property
+    def script_enabled(self) -> bool:
+        return bool(self._web_setting("isScriptEnabled"))
+
+    @script_enabled.setter
+    def script_enabled(self, value: bool) -> None:
+        self._set_web_setting("isScriptEnabled", bool(value))
+
+    @property
+    def context_menus_enabled(self) -> bool:
+        return bool(self._web_setting("areDefaultContextMenusEnabled"))
+
+    @context_menus_enabled.setter
+    def context_menus_enabled(self, value: bool) -> None:
+        self._set_web_setting("areDefaultContextMenusEnabled", bool(value))
+
+    @property
+    def web_message_enabled(self) -> bool:
+        return bool(self._web_setting("isWebMessageEnabled"))
+
+    @web_message_enabled.setter
+    def web_message_enabled(self, value: bool) -> None:
+        self._set_web_setting("isWebMessageEnabled", bool(value))
+
+    @property
+    def zoom_control_enabled(self) -> bool:
+        """是否允许用户 Ctrl+滚轮缩放（WinUI 3 不暴露程序化 zoomFactor）。"""
+        return bool(self._web_setting("isZoomControlEnabled"))
+
+    @zoom_control_enabled.setter
+    def zoom_control_enabled(self, value: bool) -> None:
+        self._set_web_setting("isZoomControlEnabled", bool(value))

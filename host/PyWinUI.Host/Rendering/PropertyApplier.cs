@@ -1,3 +1,4 @@
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -236,6 +237,9 @@ internal sealed class PropertyApplier
             case "autoCollapse":
             case "collapsedWidth":
             case "expandedWidth":
+            case "hoverExpand":
+            case "pinOnSelect":
+            case "open":
                 break;
             case "placeholder":
                 if (element is TextBox placeholderBox && ValueParsers.AsString(value) is { } placeholder)
@@ -868,6 +872,16 @@ internal sealed class PropertyApplier
 
     private void ApplyIcon(FrameworkElement element, JsonNode? value)
     {
+        var icon = ValueParsers.AsString(value);
+
+        // 标签页 / 固定选项卡用的是 IconSource，和按钮那套 FontIcon + Content
+        // 完全不同，必须在 ContentControl 分支之前拦下来。
+        if (element is TabViewItem tab)
+        {
+            tab.IconSource = BuildTabIcon(icon);
+            return;
+        }
+
         // 用 ContentControl 而不是 ButtonBase：SplitButton 不在 ButtonBase 家族里，
         // 但它同样靠 Content 显示内容
         if (element is not ContentControl)
@@ -876,11 +890,61 @@ internal sealed class PropertyApplier
             return;
         }
 
-        var glyph = ValueParsers.AsString(value);
         var face = element.Tag as ButtonFace
                    ?? new ButtonFace { Text = ReadButtonText(element) };
-        face.Glyph = string.IsNullOrWhiteSpace(glyph) ? null : glyph;
+        face.Glyph = string.IsNullOrWhiteSpace(icon) ? null : icon;
         RenderButtonFace(element, face);
+    }
+
+    /// <summary>
+    /// 标签图标：既接受 Segoe Fluent Icons 的字形（如 <c>"\uE80F"</c>），
+    /// 也接受本地图片路径（.png / .jpg / .ico / .bmp / .svg）。
+    /// 传空字符串表示去掉图标。
+    /// </summary>
+    private IconSource? BuildTabIcon(string? icon)
+    {
+        if (string.IsNullOrWhiteSpace(icon))
+        {
+            return null;
+        }
+
+        var looksLikePath = icon.Contains('\\') || icon.Contains('/')
+            || new[] { ".png", ".jpg", ".jpeg", ".ico", ".bmp", ".svg" }
+                .Any(ext => icon.EndsWith(ext, StringComparison.OrdinalIgnoreCase));
+
+        if (!looksLikePath)
+        {
+            return new FontIconSource { Glyph = icon, FontSize = 16 };
+        }
+
+        try
+        {
+            var path = Path.IsPathRooted(icon) ? icon : Path.GetFullPath(icon);
+            if (!File.Exists(path))
+            {
+                _warn($"icon 文件不存在: {path}");
+                return null;
+            }
+
+            // SVG 要用 SvgImageSource，BitmapImage 不解码矢量图。
+            // 固定栅格化成 32px：图标槽是 16 逻辑像素，32 能覆盖 200% DPI，
+            // 又不至于像无尺寸 SVG 那样按自然大小撑出巨大位图。
+            ImageSource source = Path.GetExtension(path).Equals(
+                ".svg", StringComparison.OrdinalIgnoreCase)
+                ? new SvgImageSource(new Uri(path))
+                {
+                    RasterizePixelWidth = 32,
+                    RasterizePixelHeight = 32,
+                }
+                : new BitmapImage(new Uri(path));
+
+            return new ImageIconSource { ImageSource = source };
+        }
+        catch (Exception ex)
+        {
+            _warn($"icon 加载失败: {ex.Message}");
+            return null;
+        }
     }
 
     private void ApplyButtonText(FrameworkElement element, string text)
@@ -984,184 +1048,22 @@ internal sealed class PropertyApplier
     // 自动收缩（悬停展开 / 焦点在内保持 / 失焦收起）
     // ------------------------------------------------------------------
 
-    /// <summary>自动收缩的状态。挂在元素上，元素被回收时一起消失。</summary>
-    private sealed class AutoCollapseState
-    {
-        public double Collapsed;
-        public double Expanded;
-        public bool Hooked;
-
-        /// <summary>指针是否在元素范围内。FrameworkElement 没有 IsPointerOver，只能自己记。</summary>
-        public bool PointerOver;
-    }
-
-    private readonly ConditionalWeakTable<FrameworkElement, AutoCollapseState> _autoCollapse = new();
-
     /// <summary>
-    /// 给任意容器挂上「悬停展开、点击后保持、失焦收起」的行为。
+    /// 自动收缩：悬停展开、选中保持、失焦收起。
     ///
-    /// 用 <c>element.Width</c> 做动画而不是改父容器：Grid 的 <c>auto</c> 列会跟着
-    /// 子元素宽度重新测量，所以外面不需要再写一条联动逻辑。
+    /// 实现整体在 <see cref="AutoCollapse"/> 里。以前宿主这份因为
+    /// collapsedWidth / expandedWidth 从未下发而永远不会执行，
+    /// 真正生效的是 Python 侧那套 20 步手搓动画；两套行为不一致，
+    /// 且 Python 那套带「收起后延时清字」的竞态。现在合并成宿主单点实现。
     /// </summary>
     private void ApplyAutoCollapse(FrameworkElement element, JsonObject props)
     {
-        var collapsed = ValueParsers.AsDouble(props["collapsedWidth"]) ?? 56;
-        var expanded = ValueParsers.AsDouble(props["expandedWidth"])
-                       ?? (double.IsNaN(element.Width) ? element.ActualWidth : element.Width);
-
-        if (expanded <= collapsed)
-        {
-            _warn($"autoCollapse 的展开宽度 {expanded} 必须大于收起宽度 {collapsed}");
-            return;
-        }
-
-        if (!_autoCollapse.TryGetValue(element, out var state))
-        {
-            state = new AutoCollapseState();
-            _autoCollapse.Add(element, state);
-        }
-
-        state.Collapsed = collapsed;
-        state.Expanded = expanded;
-
-        if (!state.Hooked)
-        {
-            state.Hooked = true;
-
-            // 必须用 AddHandler(handledEventsToo: true)：ListViewItem 的模板会把
-            // 指针事件标记为已处理，普通 `+=` 收不到。
-            element.AddHandler(
-                UIElement.PointerEnteredEvent,
-                new PointerEventHandler((_, _) =>
-                {
-                    state.PointerOver = true;
-                    Expand(element, state);
-                }),
-                handledEventsToo: true);
-
-            element.AddHandler(
-                UIElement.PointerExitedEvent,
-                new PointerEventHandler((_, _) =>
-                {
-                    state.PointerOver = false;
-                    ScheduleCollapse(element, state);
-                }),
-                handledEventsToo: true);
-
-            // 焦点事件没有对应的 RoutedEvent 标识，只能用普通订阅。
-            // 它们不会被 ListViewItem 吃掉，所以这里够用。
-            element.GotFocus += (_, _) => Expand(element, state);
-            element.LostFocus += (_, _) => ScheduleCollapse(element, state);
-        }
-
-        element.Width = collapsed;
-        SetCompactItems(element, true);
-
-        HostLog.Write($"[props] autoCollapse {_nodeId}: {collapsed} / {expanded}");
-    }
-
-    private static void Expand(FrameworkElement element, AutoCollapseState state)
-    {
-        HostLog.Write($"[props] expand -> {state.Expanded}");
-        AnimateWidth(element, state.Expanded);
-        SetCompactItems(element, false);
-    }
-
-    /// <summary>
-    /// 收起前必须再确认一次：指针已移开、焦点也不在里面。
-    ///
-    /// 判断延到下一轮事件循环，是因为焦点从 A 移到 B 会「先 LostFocus 再 GotFocus」，
-    /// 当场判断会把刚点进去的面板又收起来。
-    /// </summary>
-    private static void ScheduleCollapse(FrameworkElement element, AutoCollapseState state)
-    {
-        element.DispatcherQueue.TryEnqueue(() =>
-        {
-            if (state.PointerOver || HasFocusWithin(element))
-            {
-                return;
-            }
-
-            AnimateWidth(element, state.Collapsed);
-            SetCompactItems(element, true);
-            HostLog.Write($"[props] collapse -> {state.Collapsed}");
-        });
-    }
-
-    private static bool HasFocusWithin(FrameworkElement element)
-    {
-        if (element.XamlRoot is null
-            || FocusManager.GetFocusedElement(element.XamlRoot) is not DependencyObject focused)
-        {
-            return false;
-        }
-
-        for (var node = focused; node is not null; node = VisualTreeHelper.GetParent(node))
-        {
-            if (ReferenceEquals(node, element))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static void AnimateWidth(FrameworkElement element, double target)
-    {
-        try
-        {
-            // Width 是布局属性，必须开 EnableDependentAnimation 才会逐帧重排
-            var animation = new DoubleAnimation
-            {
-                To = target,
-                Duration = new Duration(TimeSpan.FromMilliseconds(160)),
-                EnableDependentAnimation = true,
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-            };
-
-            Storyboard.SetTarget(animation, element);
-            Storyboard.SetTargetProperty(animation, "Width");
-
-            var storyboard = new Storyboard();
-            storyboard.Children.Add(animation);
-            storyboard.Begin();
-        }
-        catch
-        {
-            // 动画起不来就退回直接改宽度，行为不能丢
-            element.Width = target;
-        }
-    }
-
-    /// <summary>
-    /// 收起时把列表项的说明文字藏掉，只留图标。
-    ///
-    /// 只对 ListView 的富列表项生效（它们被构造成 StackPanel{Icon, TextBlock}）；
-    /// 纯字符串项没有可藏的部分，会按宽度被裁掉。
-    /// </summary>
-    private static void SetCompactItems(FrameworkElement element, bool compact)
-    {
-        if (element is not ListView list)
+        if (_nodeId is null)
         {
             return;
         }
 
-        foreach (var item in list.Items)
-        {
-            if (item is not Panel panel)
-            {
-                continue;
-            }
-
-            foreach (var child in panel.Children)
-            {
-                if (child is TextBlock block)
-                {
-                    block.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
-                }
-            }
-        }
+        AutoCollapse.Attach(element, props, _nodeId, _warn, _emit);
     }
 
     /// <summary>
@@ -1341,6 +1243,12 @@ internal sealed class PropertyApplier
             default:
                 _warn($"items 不适用于 {element.GetType().Name}");
                 break;
+        }
+
+        // 换 ItemsSource 会重建列表项，折叠态的文字显隐需要重新应用
+        if (element is ListView)
+        {
+            AutoCollapse.Refresh(element);
         }
     }
 

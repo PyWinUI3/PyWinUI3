@@ -46,6 +46,13 @@ public sealed class ProtocolException : Exception
         NodeId = nodeId;
     }
 
-    /// <summary>该错误是否必须终止会话。</summary>
-    public bool IsFatal => Code is "bad-json" or "bad-protocol" or "version-mismatch";
+    /// <summary>
+    /// 该错误是否必须终止会话。
+    ///
+    /// 只有版本不匹配才算致命：两端对协议的理解根本不同，继续跑只会产生更难查的错。
+    /// bad-json / bad-protocol 一律不致命——消息是逐行分帧的，坏一行不影响下一行，
+    /// 回一条 error 跳过即可。把它们当致命错误的结果是「一个字段写错 → 整窗消失」，
+    /// 而 Python 侧对坏行的策略本来就是「留痕继续」，两端必须一致。
+    /// </summary>
+    public bool IsFatal => Code is "version-mismatch";
 }

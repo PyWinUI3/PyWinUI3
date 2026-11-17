@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import collections
 import os
 import sys
 import time
@@ -35,6 +36,10 @@ DEFAULT_TIMEOUT = 10.0
 #: 事件循环的单次轮询间隔。足够跟上 60fps，又不会空转烧 CPU。
 POLL_INTERVAL = 0.05
 
+#: 同一帧内的多次属性赋值合并成一条 patch 的时间窗（毫秒）。
+#: 见 PLAN「决策三」；不合并的话拖动 Slider 或跑实时 UI 会把管道刷爆。
+MERGE_WINDOW_MS = 16
+
 
 class App:
     """宿主进程与应用生命周期。"""
@@ -47,10 +52,14 @@ class App:
         *,
         timeout: float = DEFAULT_TIMEOUT,
         on_error: Callable[[UiError], None] | None = None,
+        on_warning: Callable[[str, str | None], None] | None = None,
     ):
         self._host_path = host
         self._timeout = timeout
         self._on_error = on_error
+        #: 非致命告警（属性名拼错、未知控件/事件）的回调，签名 ``(message, node_id)``。
+        #: 未设置时打到 stderr —— 不能像以前那样只留在宿主的临时日志里。
+        self._on_warning = on_warning
 
         self._host: HostProcess | None = None
         self._rev = 0
@@ -64,12 +73,25 @@ class App:
 
         # query() 同步等 result 时，中途到达的事件消息不能丢，先存这里，
         # 事件循环下一轮优先派发。回调里调 query 也安全（可重入）。
-        self._inbox: list[dict[str, Any]] = []
+        # 用 deque：高频事件风暴下 list.pop(0) 是 O(n)，整轮派发会退化成 O(n²)。
+        self._inbox: collections.deque[dict[str, Any]] = collections.deque()
 
         self._rendered = False
         self._running = False
         self._graceful = False
-        self._timers: list[tuple[float, Callable[[], None]]] = []
+        # token -> (deadline, callback)。用 token 才能取消，和 tkinter 的 after 对齐。
+        self._timers: dict[str, tuple[float, Callable[[], None]]] = {}
+        self._timer_seq = 0
+
+        # 16ms 合并窗口：待发 patch 按节点聚合，窗口结束时一次性发出。
+        # _pending_index 记录 set/window 操作在 _pending 中的位置，便于合并；
+        # 遇到 insert/remove/move 会清空索引，避免跨结构变更错误合并。
+        self._pending: list[dict[str, Any]] = []
+        self._pending_index: dict[str, int] = {}
+        self._flush_token: str | None = None
+
+        self._micro_seq = 0
+        self._on_micro_done: Callable[[dict[str, Any]], None] | None = None
 
         #: 宿主回报的能力位，握手后可用。
         self.capabilities: dict[str, Any] = {}
@@ -94,6 +116,19 @@ class App:
     def start(self) -> None:
         if self._host is not None:
             return
+
+        # 同一实例复用（quit 之后再次 mainloop）时，这些一次性状态必须复位：
+        # _graceful 留着 True 会让新会话的关闭流程走错分支，_rendered 留着 True
+        # 会让首帧前的属性写入被当成补丁发出去。
+        self._graceful = False
+        self._running = False
+        self._rendered = False
+        self._inbox.clear()
+        self._pending.clear()
+        self._pending_index.clear()
+        if self._flush_token is not None:
+            self.after_cancel(self._flush_token)
+            self._flush_token = None
 
         host = HostProcess(self._host_path)
         host.start()
@@ -168,6 +203,7 @@ class App:
 
     def mainloop(self) -> None:
         """启动宿主、渲染窗口、进入事件循环。阻塞直到窗口关闭。"""
+        self._graceful = False
         self.start()
         try:
             self._render()
@@ -182,7 +218,7 @@ class App:
         while self._running:
             # query() 阻塞期间攒下的消息优先派发，保证事件不丢、顺序不乱
             if self._inbox:
-                self._dispatch(self._inbox.pop(0))
+                self._dispatch(self._inbox.popleft())
                 self._run_timers()
                 continue
 
@@ -211,10 +247,15 @@ class App:
             self._dispatch_event(message)
         elif kind == "error":
             self._dispatch_error(message)
+        elif kind == "warning":
+            self._dispatch_warning(message)
+        elif kind == "microDone":
+            self._dispatch_micro_done(message)
         elif kind == "bye":
             self._graceful = True
             self._running = False
-        # ack / ready 无需处理：rev 只是序号，不做同步等待
+        # ack / ready / result 无需在此处理：result 由 query() 自己配对，
+        # ack 只在 render 时回一次，rev 只是序号，不做同步等待
 
     def _dispatch_event(self, message: dict[str, Any]) -> None:
         node = self._nodes.get(str(message.get("id", "")))
@@ -251,6 +292,24 @@ class App:
         except Exception:  # noqa: BLE001 - 回调异常不能杀掉事件循环
             traceback.print_exc()
 
+    def _dispatch_warning(self, message: dict[str, Any]) -> None:
+        """非致命告警：属性名拼错、未知控件类型、事件名写错等。
+
+        默认打到 stderr，这样「拼错一个属性」立刻可见，而不是等界面不生效
+        再去翻宿主临时目录里的日志。需要收集或抑制的话传 ``on_warning``。
+        """
+        text = str(message.get("message", ""))
+        node_id = message.get("id")
+        if self._on_warning is not None:
+            try:
+                self._on_warning(text, node_id if isinstance(node_id, str) else None)
+            except Exception:  # noqa: BLE001 - 告警回调不该杀掉事件循环
+                traceback.print_exc()
+            return
+
+        suffix = f" (节点 {node_id})" if isinstance(node_id, str) and node_id else ""
+        print(f"[pywinui3][warn] {text}{suffix}", file=sys.stderr)
+
     def _dispatch_error(self, message: dict[str, Any]) -> None:
         error = UiError(
             str(message.get("code", "internal")),
@@ -265,33 +324,155 @@ class App:
         else:
             print(f"[pywinui3] {error}", file=sys.stderr)
 
+    def _dispatch_micro_done(self, message: dict[str, Any]) -> None:
+        """微代码执行回执。默认只在失败时留痕，不打断事件循环。"""
+        if self._on_micro_done is not None:
+            try:
+                self._on_micro_done(message)
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
+        if not message.get("ok", False):
+            print(
+                f"[pywinui3][micro] {message.get('id', '?')} 执行失败: "
+                f"{message.get('error', '未知原因')}",
+                file=sys.stderr,
+            )
+
     # ------------------------------------------------------------------
     # 定时器
     # ------------------------------------------------------------------
 
-    def after(self, ms: int, callback: Callable[[], None]) -> None:
-        """在 ms 毫秒后执行一次。对应 tkinter 的 ``after``。"""
-        self._timers.append((time.monotonic() + ms / 1000.0, callback))
+    def after(self, ms: int, callback: Callable[[], None]) -> str:
+        """在 ms 毫秒后执行一次，返回可用于 :meth:`after_cancel` 的 token。
+
+        对应 tkinter 的 ``after``，包括返回 id 这一点——没有取消能力时，
+        「收起后延迟清字」这类回调会在状态已经反转后照样触发。
+        """
+        self._timer_seq += 1
+        token = f"a{self._timer_seq}"
+        self._timers[token] = (time.monotonic() + ms / 1000.0, callback)
+        return token
+
+    def after_cancel(self, token: str) -> None:
+        """取消一个还没触发的 ``after``。已触发或不存在时静默忽略。"""
+        self._timers.pop(token, None)
 
     def _next_timeout(self) -> float:
         if not self._timers:
             return POLL_INTERVAL
-        nearest = min(deadline for deadline, _ in self._timers)
+        nearest = min(deadline for deadline, _ in self._timers.values())
         return max(0.0, min(POLL_INTERVAL, nearest - time.monotonic()))
 
     def _run_timers(self) -> None:
         if not self._timers:
             return
         now = time.monotonic()
-        due = [(d, fn) for d, fn in self._timers if d <= now]
+        due = [
+            (token, deadline, callback)
+            for token, (deadline, callback) in self._timers.items()
+            if deadline <= now
+        ]
         if not due:
             return
-        self._timers = [(d, fn) for d, fn in self._timers if d > now]
-        for _, callback in sorted(due, key=lambda item: item[0]):
+
+        # 先摘掉再执行：回调里可能重新 after，也可能 cancel 别人
+        for token, _, _ in due:
+            self._timers.pop(token, None)
+
+        for _, _, callback in sorted(due, key=lambda item: item[1]):
             try:
                 callback()
             except Exception:  # noqa: BLE001
                 traceback.print_exc()
+
+    # ------------------------------------------------------------------
+    # 补丁合并与微代码
+    # ------------------------------------------------------------------
+
+    def _merge_pending(self, ops: list[dict[str, Any]]) -> None:
+        """把 ops 并入待发队列，同一节点的 set 合并成一个 op。
+
+        只合并连续的、同 id 的 set/window；insert / remove / move 会清空
+        合并索引——否则「remove n1 → 重建一个也叫 n1 的节点 → set」会被
+        错误地并到被删掉的那个 set 上。
+        """
+        for op in ops:
+            kind = op.get("t")
+            if kind == "set":
+                key = "set:" + str(op.get("id"))
+                index = self._pending_index.get(key)
+                if index is not None and self._pending[index].get("t") == "set":
+                    target = self._pending[index]
+                    target.setdefault("props", {}).update(op.get("props") or {})
+                    if "events" in op:
+                        target["events"] = op["events"]
+                    continue
+                merged: dict[str, Any] = {
+                    "t": "set",
+                    "id": op.get("id"),
+                    "props": dict(op.get("props") or {}),
+                }
+                if "events" in op:
+                    merged["events"] = op["events"]
+                self._pending_index[key] = len(self._pending)
+                self._pending.append(merged)
+                continue
+
+            if kind == "window":
+                index = self._pending_index.get("window")
+                if index is not None and self._pending[index].get("t") == "window":
+                    self._pending[index].setdefault("props", {}).update(op.get("props") or {})
+                    continue
+                self._pending_index["window"] = len(self._pending)
+                self._pending.append({"t": "window", "props": dict(op.get("props") or {})})
+                continue
+
+            # 结构类操作保持独立、保持顺序
+            self._pending_index.clear()
+            self._pending.append(op)
+
+    def _flush_patches(self) -> None:
+        """立刻发出合并窗口里攒下的 patch，并取消挂着的 flush 定时器。"""
+        if self._flush_token is not None:
+            self.after_cancel(self._flush_token)
+            self._flush_token = None
+        if not self._pending:
+            return
+        ops = self._pending
+        self._pending = []
+        self._pending_index = {}
+        if self._host is None:
+            return
+        self._rev += 1
+        self._host.send(protocol.patch(self._rev, ops))
+
+    def _schedule_flush(self) -> None:
+        if self._flush_token is None:
+            self._flush_token = self.after(MERGE_WINDOW_MS, self._flush_patches)
+
+    def micro(
+        self,
+        node_id: str,
+        program: list[dict[str, Any]],
+        *,
+        notify: bool = False,
+    ) -> str:
+        """把一段受限指令交给宿主在 UI 线程内执行，返回请求 id。
+
+        这是「Python 在 C# 里注入微代码」的入口：宿主按固定语义解释指令，
+        不编译、不反射、不碰 IO。典型收益是动画从「每帧一次往返」变成
+        「一条消息跑完整段补间」。
+
+        发送前会强制 flush 待发 patch，保证指令看到的是最新状态。
+        ``notify=True`` 时宿主执行完回 ``t="microDone"``。
+        """
+        self._flush_patches()
+        if self._host is None:
+            raise RuntimeError("宿主尚未启动，无法执行微代码")
+        self._micro_seq += 1
+        request_id = f"m{self._micro_seq}"
+        self._host.send(protocol.micro(request_id, node_id, program, notify=notify))
+        return request_id
 
     # ------------------------------------------------------------------
     # 退出
@@ -299,6 +480,8 @@ class App:
 
     def quit(self) -> None:
         """请求关闭窗口并退出事件循环。"""
+        # 合并窗口里可能还压着最后一次属性更新，关窗前必须落地
+        self._flush_patches()
         self._graceful = True
         self._running = False
         if self._host is not None:
@@ -317,6 +500,7 @@ class App:
         """
         if self._host is None:
             return
+        self._flush_patches()
         try:
             self._host.send(protocol.dialog(title, body, kind))
         except HostExited:
@@ -353,6 +537,10 @@ class App:
         if host is None:
             raise RuntimeError("宿主尚未启动，无法查询运行时状态")
 
+        # 同步读回必须看到最新状态：合并窗口里压着的 patch 先发出去。
+        # 少了这一步，query() 会读到上一次 flush 之前的旧值，而且很难察觉。
+        self._flush_patches()
+
         self._query_seq += 1
         request_id = f"q{self._query_seq}"
         host.send(protocol.query(request_id, node_id, key, args))
@@ -373,11 +561,27 @@ class App:
                     raise UiError("query", str(message.get("error", "查询失败")), node_id)
                 return message.get("value")
 
+            if message.get("t") == "bye":
+                # 宿主已经退出，继续等下去只会等到超时，把「进程没了」
+                # 误报成「读取超时」。
+                self._graceful = True
+                self._running = False
+                raise HostExited("宿主在查询过程中退出", host.exit_code, host.stderr_text)
+
             self._inbox.append(message)
 
     def _shutdown(self) -> None:
+        self._flush_patches()
         host = self._host
         self._host = None
+        self._rendered = False
+        self._running = False
+
+        # 默认单例不能继续指向已经关掉的 App：否则 Window() 会拿到死实例，
+        # 新建控件的补丁被静默丢弃（不报错也不显示）。
+        if App._default is self:
+            App._default = None
+
         if host is None:
             return
         if not self._graceful:
@@ -421,14 +625,22 @@ class App:
         self._send_patch(ops)
 
     def _send_patch(self, ops: list[dict[str, Any]]) -> None:
+        """进入 16ms 合并窗口，而不是立刻发一条消息。
+
+        ``query`` / ``invoke`` / ``dialog`` / ``close`` / ``micro`` 之前都会
+        强制 flush，保证「先改属性再读回来」的因果顺序不被窗口打乱。
+        """
         if not ops or not self._rendered or self._host is None:
             return
-        self._rev += 1
-        self._host.send(protocol.patch(self._rev, ops))
+        self._merge_pending(ops)
+        self._schedule_flush()
 
     def _send_invoke(self, node_id: str, method: str, args: dict[str, Any] | None = None) -> None:
         if self._host is None:
             return
+        # invoke 常紧跟在 insert / set 之后（例如插入节点后立刻 focus），
+        # 不 flush 的话宿主会先执行 invoke、再看到节点，报 unknown-node。
+        self._flush_patches()
         self._host.send(protocol.invoke(node_id, method, args))
 
     # ------------------------------------------------------------------

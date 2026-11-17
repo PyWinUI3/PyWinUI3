@@ -72,6 +72,12 @@ class Host:
         self.proc.stdin.write(payload)
         self.proc.stdin.flush()
 
+    def send_raw(self, line: str) -> None:
+        """发一行原文，用于故意构造坏 JSON。"""
+        assert self.proc.stdin is not None
+        self.proc.stdin.write((line.rstrip() + "\n").encode("utf-8"))
+        self.proc.stdin.flush()
+
     def recv(self, timeout: float = 10.0) -> dict:
         try:
             item = self._queue.get(timeout=timeout)
@@ -149,6 +155,23 @@ def build_nodes() -> tuple[str, list[dict]]:
     return "n0", nodes
 
 
+_QUERY_SEQ = iter(range(1, 100_000))
+
+
+def query_value(host: "Host", node: str, key: str) -> dict:
+    """发一条 query 并等到对应的 result。
+
+    patch 不再逐条回 ack，所以「补丁/插入是否生效」只能靠同步读回来验证。
+    沿途的 warning、event 一律跳过，只认 id 匹配的那条。
+    """
+    request_id = f"q{next(_QUERY_SEQ)}"
+    host.send({"op": "query", "id": request_id, "node": node, "key": key})
+    while True:
+        message = host.recv(timeout=8)
+        if message.get("t") == "result" and message.get("id") == request_id:
+            return message
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", type=Path, default=None)
@@ -211,9 +234,10 @@ def main() -> int:
                 {"t": "set", "id": "n3", "props": {"text": "程序设置的值"}},
             ],
         })
-        ack2 = host.recv()
-        check("patch 收到 ack", ack2.get("t") == "ack", str(ack2.get("t")))
-        check("rev=2", ack2.get("rev") == 2, str(ack2.get("rev")))
+
+        # patch 不再逐条回 ack（协议 2.2），用 query 读回来验证它真的落地了
+        patched = query_value(host, "n1", "text")
+        check("patch 生效（读回 text）", patched.get("value") == "补丁生效了", str(patched))
 
         # --- 插入节点 ---
         print("\n[4] insert")
@@ -225,8 +249,9 @@ def main() -> int:
                          "props": {"text": "这是运行中插入的一行", "fontSize": 13}},
             }],
         })
-        ack3 = host.recv()
-        check("insert 收到 ack", ack3.get("t") == "ack", str(ack3.get("t")))
+
+        inserted = query_value(host, "n8", "text")
+        check("insert 生效（读回 text）", inserted.get("value") == "这是运行中插入的一行", str(inserted))
 
         # --- 保持窗口以便外部截图 ---
         if args.hold > 0:

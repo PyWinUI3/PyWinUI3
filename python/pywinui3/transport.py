@@ -170,6 +170,10 @@ class HostProcess:
             raise HostTimeout(f"等待宿主消息超时（{timeout}s）") from exc
 
         if item is _CLOSED:
+            # 哨兵消费后放回：EOF 是持久状态，后续 recv 也该立刻失败。
+            # 只 put 一次的话，第二次 recv 会空等到超时，把「宿主没了」
+            # 错报成「读取超时」。
+            self._queue.put(_CLOSED)
             raise HostExited(
                 "宿主进程已退出",
                 self._exit_code,

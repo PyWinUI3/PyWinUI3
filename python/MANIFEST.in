@@ -1,0 +1,2 @@
+# sdist 也要带上宿主构建产物，否则从源码包安装同样缺 exe。
+recursive-include pywinui3/runtime *

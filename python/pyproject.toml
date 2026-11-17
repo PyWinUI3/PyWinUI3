@@ -30,10 +30,16 @@ Homepage = "https://github.com/SystenGames/PyWinUI3"
 Source = "https://github.com/SystenGames/PyWinUI3"
 Issues = "https://github.com/SystenGames/PyWinUI3/issues"
 
+[tool.setuptools]
+# 让 MANIFEST.in 生效：host 产物不是 .py，必须显式声明才会进 wheel
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["pywinui3*"]
 
 [tool.setuptools.package-data]
-# 宿主构建产物随包分发，安装后无需额外构建
-pywinui3 = ["runtime/**/*"]
+# 宿主构建产物随包分发，安装后无需额外构建。
+# 这里只声明顶层文件；runtime/ 下的多级子目录（各语言资源、runtimes/）
+# 由 MANIFEST.in 的 recursive-include 负责收进来。
+pywinui3 = ["runtime/*"]

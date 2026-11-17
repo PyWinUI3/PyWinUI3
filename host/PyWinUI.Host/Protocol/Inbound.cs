@@ -72,6 +72,31 @@ public sealed record CloseMessage : InboundMessage
 }
 
 /// <summary>
+/// 一段在宿主 UI 线程内执行的受限指令。
+///
+/// 这不是可执行 C# 代码：program 只是数据，由 MicroRuntime 按固定语义解释，
+/// 指令白名单、数量上限、数值范围、时长上限都在这里和运行时双重校验。
+/// 引入它是为了把「每帧一次跨进程往返」的动画改成「一条消息跑完整段」。
+/// </summary>
+public sealed record MicroMessage : InboundMessage
+{
+    public required string Id { get; init; }
+    public required string Node { get; init; }
+    public required JsonArray Program { get; init; }
+    public bool Notify { get; init; }
+}
+
+/// <summary>
+/// 本宿主不认识的消息类型。协议第 7 章规定「新增 op 不算不兼容变更」，
+/// 因此未知 op 不能终止会话：回一条 warning 提醒版本错配，然后忽略。
+/// 这样新 Python 配旧宿主时只是新功能不可用，而不是第一条 query 就把会话打死。
+/// </summary>
+public sealed record UnknownMessage : InboundMessage
+{
+    public required string Op { get; init; }
+}
+
+/// <summary>
 /// 入站消息解析。所有校验都在这里做完，渲染层拿到的就是类型化的对象。
 /// </summary>
 public static class Inbound
@@ -101,9 +126,12 @@ public static class Inbound
                 "patch" => ParsePatch(root),
                 "invoke" => ParseInvoke(root),
                 "query" => ParseQuery(root),
+                "micro" => ParseMicro(root),
                 "dialog" => ParseDialog(root),
                 "close" => ParseClose(root),
-                var op => throw new ProtocolException("bad-protocol", $"未知消息 op \"{op}\""),
+                // 新增 op 不算不兼容变更，旧端遇到新消息应当忽略而不是终止会话。
+                // 字段缺失/类型错误仍然走 bad-protocol 并终止（见 Wire.IsFatal）。
+                var op => new UnknownMessage { Op = op },
             };
         }
     }
@@ -164,6 +192,45 @@ public static class Inbound
     {
         Code = (int)(TryLong(e, "code") ?? 0),
     };
+
+    /// <summary>
+    /// 解析 micro 指令序列。这里只做**形状**校验，语义校验（白名单、数值范围、
+    /// 时长上限、节点是否存在）由 MicroRuntime 在 UI 线程再做一次。
+    /// 校验失败一律回非致命的 bad-micro，不让一条坏指令终止整个会话。
+    /// </summary>
+    private static MicroMessage ParseMicro(JsonElement e)
+    {
+        var id = RequireString(e, "id");
+        var node = RequireString(e, "node");
+        var ops = RequireArray(e, "program");
+
+        if (ops.GetArrayLength() == 0)
+            throw new ProtocolException("bad-micro", "micro program 不能为空", id);
+        if (ops.GetArrayLength() > 64)
+            throw new ProtocolException("bad-micro", "micro program 超过 64 条指令上限", id);
+
+        var program = new JsonArray();
+        foreach (var op in ops.EnumerateArray())
+        {
+            if (op.ValueKind != JsonValueKind.Object
+                || !op.TryGetProperty("i", out var instruction)
+                || instruction.ValueKind != JsonValueKind.String)
+            {
+                throw new ProtocolException("bad-micro", "micro 指令必须是带 i 字段的对象", id);
+            }
+
+            // 必须复制：JsonElement 在 using(doc) 结束后就失效了
+            program.Add(JsonNode.Parse(op.GetRawText()));
+        }
+
+        return new MicroMessage
+        {
+            Id = id,
+            Node = node,
+            Program = program,
+            Notify = TryBool(e, "notify") ?? false,
+        };
+    }
 
     private static DialogMessage ParseDialog(JsonElement e) => new()
     {

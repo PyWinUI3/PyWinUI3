@@ -1,7 +1,7 @@
 """自动收缩侧栏。
 
 鼠标移到左边窄条上 → 展开；点一个导航项后把鼠标移开 → 保持展开；
-点到右边内容区 → 收起。展开/收起是 20 步指数缓出动画
+点到右边内容区 → 收起。展开/收起是 100 步指数缓出动画
 （``w += (end_w - w) / 3``，最后一步 snap 到目标值）。
 """
 
@@ -35,7 +35,7 @@ def main() -> None:
         ],
         width=200,
         auto_collapse=True,
-        collapsed_width=56,
+        collapsed_width=40,
         background="#F3F3F3",
     )
     nav.grid(row=0, column=0)

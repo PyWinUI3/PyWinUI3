@@ -22,6 +22,13 @@ internal sealed class QueryExecutor
     private readonly Window _window;
     private bool _active = true;
 
+    /// <summary>
+    /// 上次强制布局的时间戳（TickCount64，毫秒）。
+    /// 每次读几何值都 UpdateLayout 的话，连读 N 个属性就是 N 次全量布局，
+    /// 主线程同步阻塞会累加成明显卡顿；一帧内只跑一次即可。
+    /// </summary>
+    private long _lastLayoutTick;
+
     public QueryExecutor(Window window)
     {
         _window = window;
@@ -69,13 +76,20 @@ internal sealed class QueryExecutor
         // 不 UpdateLayout 就会在「已经 Loaded 但还没 Measure」的窗口期读到 0。
         if (key is "actualWidth" or "actualHeight" or "bounds")
         {
-            try
+            // 一帧（16ms）内只强制布局一次。连续读 actualWidth / actualHeight /
+            // bounds 时后两次直接复用上一帧的布局结果，不必再跑一遍整窗 Measure+Arrange。
+            var now = Environment.TickCount64;
+            if (now - _lastLayoutTick >= 16 || _lastLayoutTick == 0)
             {
-                element.UpdateLayout();
-            }
-            catch (Exception ex)
-            {
-                HostLog.Write("[query] UpdateLayout 失败: " + ex.Message);
+                _lastLayoutTick = now;
+                try
+                {
+                    element.UpdateLayout();
+                }
+                catch (Exception ex)
+                {
+                    HostLog.Write("[query] UpdateLayout 失败: " + ex.Message);
+                }
             }
         }
 
@@ -94,6 +108,53 @@ internal sealed class QueryExecutor
                 };
             case "isLoaded": return element.IsLoaded;
             case "isVisible": return element.Visibility == Visibility.Visible;
+            // TabView 专用：标签当前顺序 / 每个标签在窗口客户区里的矩形。
+            // 坐标是相对窗口内容的逻辑像素，调用方加上客户区原点就是屏幕坐标；
+            // 自动化拖拽测试靠它定位标签，人工排查顺序也靠它。
+            case "tabOrder":
+                if (element is TabView orderTabs)
+                {
+                    return string.Join(
+                        ",",
+                        orderTabs.TabItems.OfType<TabViewItem>()
+                            .Select(ExtendedControls.TabHeaderText));
+                }
+
+                return null;
+            case "selectedTab":
+                return element is TabView selectedTabs
+                       && selectedTabs.SelectedItem is TabViewItem selectedTab
+                    ? ExtendedControls.TabHeaderText(selectedTab)
+                    : null;
+            case "tabRects":
+                if (element is TabView rectTabs)
+                {
+                    element.UpdateLayout();
+                    var rects = new JsonArray();
+                    foreach (var item in rectTabs.TabItems)
+                    {
+                        if (item is not TabViewItem tab)
+                        {
+                            continue;
+                        }
+
+                        var origin = tab.TransformToVisual(null)
+                            .TransformPoint(new Windows.Foundation.Point(0, 0));
+                        rects.Add(new JsonObject
+                        {
+                            ["text"] = ExtendedControls.TabHeaderText(tab),
+                            ["pinned"] = ExtendedControls.IsPinnedTab(tab),
+                            ["x"] = origin.X,
+                            ["y"] = origin.Y,
+                            ["w"] = tab.ActualWidth,
+                            ["h"] = tab.ActualHeight,
+                        });
+                    }
+
+                    return rects;
+                }
+
+                return null;
             case "opacity": return element.Opacity;
             case "name": return element.Name;
             case "tag": return element.Tag as string;
@@ -141,7 +202,15 @@ internal sealed class QueryExecutor
 
             // ---- 展开 / 提示类 ----
             case "isOpen":
-                return (element as InfoBar)?.IsOpen ?? false;
+                return element switch
+                {
+                    InfoBar info => info.IsOpen,
+                    // 自动收缩侧栏的展开态由 AutoCollapse 维护
+                    ListView list => AutoCollapse.IsOpen(list) ?? false,
+                    _ => false,
+                };
+            case "isPinned":
+                return element is ListView pinnedList && AutoCollapse.IsPinned(pinnedList);
             case "isExpanded":
                 return (element as Expander)?.IsExpanded ?? false;
             case "severity":
@@ -160,6 +229,14 @@ internal sealed class QueryExecutor
                 return element is WebView2 forwardWeb && forwardWeb.CanGoForward;
             case "webTitle":
                 return element is WebView2 titled ? titled.CoreWebView2?.DocumentTitle : null;
+            case "userAgent":
+            case "isScriptEnabled":
+            case "areDefaultContextMenusEnabled":
+            case "isWebMessageEnabled":
+            case "isZoomControlEnabled":
+                return element is WebView2 settingsWeb
+                    ? WebView2Support.GetSetting(settingsWeb, key)
+                    : null;
 
             // ---- 媒体 ----
             case "position":
@@ -177,6 +254,11 @@ internal sealed class QueryExecutor
             case "volume":
                 return element is MediaPlayerElement mediaVol ? mediaVol.MediaPlayer?.Volume ?? 1 : 1;
             case "isMuted":
+                if (element is WebView2 mutedWeb)
+                {
+                    return WebView2Support.GetSetting(mutedWeb, "isMuted");
+                }
+
                 return element is MediaPlayerElement mediaMute && mediaMute.MediaPlayer?.IsMuted == true;
             case "playbackRate":
                 return element is MediaPlayerElement mediaRate
@@ -228,6 +310,10 @@ internal sealed class QueryExecutor
         RichTextBlock rich => string.Concat(rich.Blocks.OfType<Paragraph>()
             .SelectMany(p => p.Inlines.OfType<Run>()).Select(r => r.Text)),
         ComboBox combo => combo.SelectedItem as string ?? combo.Text,
+        // 必须在 ContentControl 之前：TabViewItem 也是 ContentControl，
+        // 落到下面会去读 Content（TabPage 里预置的 StackPanel），
+        // 返回的是标签内容的第一段文字，而不是标签标题。
+        TabViewItem tab => ExtendedControls.TabHeaderText(tab),
         ContentControl content => ReadContentText(content.Content),
         _ => null,
     };

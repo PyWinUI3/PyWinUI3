@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Nodes;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -24,6 +25,7 @@ internal sealed class FormRenderer
     private readonly EventBridge _bridge;
     private readonly Action<string> _warn;
     private readonly Action<string, string, string?> _error;
+    private readonly Action<string, string, JsonObject?, bool> _emit;
 
     private readonly Dictionary<string, FrameworkElement> _nodes = new();
     private readonly Dictionary<string, NodeSpec> _specs = new();
@@ -43,14 +45,57 @@ internal sealed class FormRenderer
         _window = window;
         _warn = warn;
         _error = error;
+        _emit = emit;
         _applier = new PropertyApplier(warn, emit);
-        _bridge = new EventBridge(emit, warn);
+        _bridge = new EventBridge(emit, warn, TryGetNodeId, OwnerOrNull);
     }
 
     public int NodeCount => _nodes.Count;
 
-    public bool TryGetElement(string id, out FrameworkElement element) =>
-        _nodes.TryGetValue(id, out element!);
+    /// <summary>某个节点是否真的订阅了某个事件（select_tab 用它避免重复回事件）。</summary>
+    public bool IsEventBound(string nodeId, string eventName) =>
+        _bridge.IsBound(nodeId, eventName);
+
+    private FrameworkElement? OwnerOrNull(string nodeId) =>
+        TryGetOwner(nodeId, out var owner) ? owner : null;
+
+    public bool TryGetElement(string id, [NotNullWhen(true)] out FrameworkElement? element) =>
+        _nodes.TryGetValue(id, out element);
+
+    /// <summary>
+    /// 取某个节点的直接父元素（协议层的父，不是可视树的父）。
+    /// TabViewItem 放在 TabItems 里时 <c>Parent</c> 是 null，未选中的页
+    /// 往往还没实体化，沿可视树往上找并不可靠。
+    /// </summary>
+    public bool TryGetOwner(string nodeId, out FrameworkElement owner)
+    {
+        if (_parentOf.TryGetValue(nodeId, out var parentId)
+            && _nodes.TryGetValue(parentId, out var element))
+        {
+            owner = element;
+            return true;
+        }
+
+        owner = null!;
+        return false;
+    }
+
+    /// <summary>
+    /// 把元素反查成节点 id。事件载荷需要指向「具体某个子元素」时用，
+    /// 例如用户关闭的是哪个标签页 —— 只回标题文字的话，同名标签会关错。
+    /// </summary>
+    public string? TryGetNodeId(DependencyObject element)
+    {
+        foreach (var pair in _nodes)
+        {
+            if (ReferenceEquals(pair.Value, element))
+            {
+                return pair.Key;
+            }
+        }
+
+        return null;
+    }
 
     // ==================================================================
     // 全量渲染
@@ -93,8 +138,13 @@ internal sealed class FormRenderer
                 continue;
             }
 
-            _nodes[spec.Id] = NodeFactory.Create(spec.Type, spec.Id, spec.Props, _warn);
+            var created = NodeFactory.Create(spec.Type, spec.Id, spec.Props, _warn);
+            _nodes[spec.Id] = created;
             _specs[spec.Id] = spec;
+            if (created is WebView2 webNode)
+            {
+                WebView2Support.Attach(webNode, spec.Id, _emit);
+            }
         }
 
         HostLog.Write($"[render] created {_nodes.Count} nodes");
@@ -126,13 +176,21 @@ internal sealed class FormRenderer
                 continue;
             }
 
-            if (ChildHostOf(parentElement) is not { } panel)
+            if (!CanHaveChildren(parentElement))
             {
                 _error("bad-protocol", $"节点 {spec.Id}（{spec.Type}）不能包含子节点", spec.Id);
                 continue;
             }
 
-            panel.Children.Clear();
+            // TabView 特殊：items 生成的普通标签页此时已经在 TabItems 里，
+            // 不能 Clear（会把它们冲掉）；子节点只追加，顺序由标签条自己管理。
+            // 其它容器是全新树，先清空再按 children 顺序挂。
+            if (parentElement is not TabView && ChildHostOf(parentElement) is { } panel)
+            {
+                panel.Children.Clear();
+            }
+
+            var position = 0;
             foreach (var childId in spec.Children)
             {
                 if (!_nodes.TryGetValue(childId, out var childElement))
@@ -158,7 +216,12 @@ internal sealed class FormRenderer
                     continue;
                 }
 
-                panel.Children.Add(childElement);
+                if (!AttachChild(parentElement, childElement, position++))
+                {
+                    _error("bad-protocol", $"节点 {childId} 不能作为 {spec.Id} 的子节点", childId);
+                    continue;
+                }
+
                 _parentOf[childId] = spec.Id;
             }
         }
@@ -357,7 +420,7 @@ internal sealed class FormRenderer
             return;
         }
 
-        if (ChildHostOf(parentElement) is not { } panel)
+        if (!CanHaveChildren(parentElement))
         {
             _error("bad-protocol", $"节点 {op.Parent} 不是容器，无法插入子节点", op.Parent);
             return;
@@ -366,11 +429,20 @@ internal sealed class FormRenderer
         var element = NodeFactory.Create(spec.Type, spec.Id, spec.Props, _warn);
         _nodes[spec.Id] = element;
         _specs[spec.Id] = spec;
+        if (element is WebView2 insertedWeb)
+        {
+            WebView2Support.Attach(insertedWeb, spec.Id, _emit);
+        }
 
         ApplyPropsSuppressed(spec.Id, element, spec.Props);
 
-        var index = Math.Clamp(op.Index, 0, panel.Children.Count);
-        panel.Children.Insert(index, element);
+        if (!AttachChild(parentElement, element, op.Index))
+        {
+            _nodes.Remove(spec.Id);
+            _specs.Remove(spec.Id);
+            _error("bad-protocol", $"节点 {spec.Id} 不能作为 {op.Parent} 的子节点", spec.Id);
+            return;
+        }
         _parentOf[spec.Id] = op.Parent;
 
         if (spec.Events is { Count: > 0 })
@@ -389,7 +461,20 @@ internal sealed class FormRenderer
 
         var doomed = CollectSubtree(op.Id);
 
-        if (element.Parent is Panel parent)
+        TabView? ownerTabs = null;
+        if (_parentOf.TryGetValue(op.Id, out var parentId)
+            && _nodes.TryGetValue(parentId, out var owner))
+        {
+            ownerTabs = owner as TabView;
+        }
+
+        if (ownerTabs is not null && element is TabViewItem tab)
+        {
+            // 标签页 / 固定选项卡不在 Panel.Children 里，得从 TabItems 摘
+            ownerTabs.TabItems.Remove(tab);
+            ExtendedControls.UnregisterPinned(ownerTabs, tab);
+        }
+        else if (element.Parent is Panel parent)
         {
             parent.Children.Remove(element);
         }
@@ -426,19 +511,34 @@ internal sealed class FormRenderer
             return;
         }
 
-        if (ChildHostOf(newParentElement) is not { } newPanel)
+        if (!CanHaveChildren(newParentElement))
         {
             _error("bad-protocol", $"节点 {op.Parent} 不是容器", op.Parent);
             return;
         }
 
-        if (element.Parent is Panel oldPanel)
+        TabView? oldTabs = null;
+        if (_parentOf.TryGetValue(op.Id, out var oldParentId)
+            && _nodes.TryGetValue(oldParentId, out var oldOwner))
+        {
+            oldTabs = oldOwner as TabView;
+        }
+
+        if (oldTabs is not null && element is TabViewItem oldTab)
+        {
+            oldTabs.TabItems.Remove(oldTab);
+            ExtendedControls.UnregisterPinned(oldTabs, oldTab);
+        }
+        else if (element.Parent is Panel oldPanel)
         {
             oldPanel.Children.Remove(element);
         }
 
-        var index = Math.Clamp(op.Index, 0, newPanel.Children.Count);
-        newPanel.Children.Insert(index, element);
+        if (!AttachChild(newParentElement, element, op.Index))
+        {
+            _error("bad-protocol", $"节点 {op.Id} 不能移到 {op.Parent} 下", op.Id);
+            return;
+        }
         _parentOf[op.Id] = op.Parent;
     }
 
@@ -470,31 +570,124 @@ internal sealed class FormRenderer
             NavigationView { Content: Panel navInner } => navInner,
             RefreshContainer { Content: Panel refreshInner } => refreshInner,
             TwoPaneView { Pane1: Panel pane1 } => pane1,
+            // TabPage：TabViewItem.Content 里预置的 StackPanel，
+            // 于是标签页也能像 Column 一样直接放子控件。
+            TabViewItem { Content: Panel tabInner } => tabInner,
             _ => null,
         };
     }
 
-    /// <summary>收集某个节点及其全部子孙的 id。删除时要一起清出节点表。</summary>
+    /// <summary>能不能挂子节点。TabView 的子节点是标签，不是 Panel.Children。</summary>
+    private static bool CanHaveChildren(FrameworkElement element) =>
+        element is TabView || ChildHostOf(element) is not null;
+
+    /// <summary>
+    /// 统一挂载入口：建树、insert、move 三条路径共用。
+    ///
+    /// TabView 的两类子元素都是 TabViewItem：
+    /// - PinnedTab 插到「固定标签块」的末尾，永远排在普通标签前面；
+    /// - TabPage 追加到 TabItems 末尾，受 WinUI 内置拖动重排 / 关闭机制管理。
+    ///
+    /// 两类标签都忽略协议里的 index：标签条的真实顺序由用户拖动决定，
+    /// 用 Python 侧 children 的下标去硬插反而会错位。
+    /// </summary>
+    private static bool AttachChild(FrameworkElement parent, FrameworkElement child, int index)
+    {
+        if (parent is TabView tabs)
+        {
+            if (child is TabViewItem tab)
+            {
+                if (ExtendedControls.IsPinnedTab(tab))
+                {
+                    // 固定标签块内部保持添加顺序，整块永远在普通标签之前
+                    var insertAt = 0;
+                    while (insertAt < tabs.TabItems.Count
+                           && ExtendedControls.IsPinnedTab(tabs.TabItems[insertAt]))
+                    {
+                        insertAt++;
+                    }
+
+                    tabs.TabItems.Insert(insertAt, tab);
+                    ExtendedControls.RegisterPinned(tabs, tab);
+                }
+                else
+                {
+                    tabs.TabItems.Add(tab);
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        if (ChildHostOf(parent) is not { } panel)
+        {
+            return false;
+        }
+
+        panel.Children.Insert(Math.Clamp(index, 0, panel.Children.Count), child);
+        return true;
+    }
+
+    /// <summary>
+    /// 收集某个节点及其全部子孙的 id。删除时要一起清出节点表。
+    ///
+    /// 旧实现每出队一个节点就遍历整个 _parentOf，还用 List.Contains 判重，
+    /// 删一棵 N 个节点的子树是 O(N²·M)；examples/03_live.py 里逐行 destroy()
+    /// 会把这个成本放大成明显的卡顿。先一次性建邻接表再 BFS，整体 O(N+M)。
+    /// </summary>
     private List<string> CollectSubtree(string rootId)
     {
-        var result = new List<string> { rootId };
+        var childrenOf = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var pair in _parentOf)
+        {
+            if (!childrenOf.TryGetValue(pair.Value, out var list))
+            {
+                list = new List<string>();
+                childrenOf[pair.Value] = list;
+            }
+            list.Add(pair.Key);
+        }
+
+        var result = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal) { rootId };
         var queue = new Queue<string>();
         queue.Enqueue(rootId);
 
         while (queue.Count > 0)
         {
             var current = queue.Dequeue();
-            foreach (var pair in _parentOf)
+            result.Add(current);
+            if (!childrenOf.TryGetValue(current, out var children))
             {
-                if (pair.Value == current && !result.Contains(pair.Key))
+                continue;
+            }
+
+            foreach (var child in children)
+            {
+                if (seen.Add(child))
                 {
-                    result.Add(pair.Key);
-                    queue.Enqueue(pair.Key);
+                    queue.Enqueue(child);
                 }
             }
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// 供 MicroRuntime 的 set 指令使用：走和普通 patch 完全相同的属性应用链
+    /// （含回声抑制），但不需要组装一条 patch 消息。
+    /// </summary>
+    public void ApplyMicroProps(string nodeId, JsonObject props)
+    {
+        if (!_nodes.TryGetValue(nodeId, out var element))
+        {
+            throw new InvalidOperationException($"micro set 的节点不存在: {nodeId}");
+        }
+
+        ApplyPropsSuppressed(nodeId, element, props);
     }
 
     /// <summary>应用属性，期间把元素标记为「程序在改」，压住回声事件。</summary>

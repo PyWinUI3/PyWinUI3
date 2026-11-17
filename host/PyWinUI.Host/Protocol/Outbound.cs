@@ -34,7 +34,7 @@ public static class Outbound
         id,
         @event = eventName,
         rev,
-        data,
+        data = SanitizeNonFinite(data),
         // 只在为 true 时输出，避免每条事件都带一个 false 字段
         echo = echo ? true : (bool?)null,
     });
@@ -48,8 +48,28 @@ public static class Outbound
         t = "result",
         id,
         ok,
-        value,
+        value = SanitizeNonFinite(value),
         error = ok ? null : error,
+    });
+
+    /// <summary>
+    /// 非致命诊断。属性名拼错、未知控件类型、事件名写错这类问题不会让渲染失败，
+    /// 但只写进 %TEMP% 日志等于没告诉用户——所以单独回传一条，Python 侧默认打到 stderr。
+    /// </summary>
+    public static string Warning(string message, string? id = null) => Serialize(new
+    {
+        t = "warning",
+        message,
+        id,
+    });
+
+    /// <summary>micro 程序执行完毕的回执。只有请求带 notify=true 时才发。</summary>
+    public static string MicroDone(string id, bool ok, string? error = null) => Serialize(new
+    {
+        t = "microDone",
+        id,
+        ok,
+        error,
     });
 
     public static string Error(string code, string message, string? id = null) => Serialize(new
@@ -61,6 +81,77 @@ public static class Outbound
     });
 
     public static string Bye(int code) => Serialize(new { t = "bye", code });
+
+    /// <summary>
+    /// 把 NaN / Infinity 换成 null。
+    ///
+    /// JSON 没有 NaN：System.Text.Json 遇到非有限 double 会直接抛异常。
+    /// 最典型的来源是 NumberBox 的空值（Value 就是 double.NaN），
+    /// 以前 query("value") 只能回 ok=false；现在回 null，语义也更准。
+    /// 事件载荷同样处理，避免 Slider 之类的值把整条 event 打废。
+    /// </summary>
+    private static JsonNode? SanitizeNonFinite(JsonNode? node)
+    {
+        if (node is null)
+        {
+            return null;
+        }
+
+        var clone = node.DeepClone();
+
+        // 顶层就是 NaN 的情况（NumberBox.Value 就是）：Fix 只遍历容器，
+        // 不先判一次的话，这个值会原样进 JsonSerializer 然后抛异常。
+        if (IsNonFinite(clone))
+        {
+            return null;
+        }
+
+        Fix(clone);
+        return clone;
+    }
+
+    private static void Fix(JsonNode node)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var key in obj.Select(pair => pair.Key).ToList())
+                {
+                    var child = obj[key];
+                    if (IsNonFinite(child))
+                    {
+                        obj[key] = null;
+                    }
+                    else if (child is not null)
+                    {
+                        Fix(child);
+                    }
+                }
+
+                break;
+
+            case JsonArray array:
+                for (var i = 0; i < array.Count; i++)
+                {
+                    var child = array[i];
+                    if (IsNonFinite(child))
+                    {
+                        array[i] = null;
+                    }
+                    else if (child is not null)
+                    {
+                        Fix(child);
+                    }
+                }
+
+                break;
+        }
+    }
+
+    private static bool IsNonFinite(JsonNode? node) =>
+        node is JsonValue value
+        && value.TryGetValue<double>(out var number)
+        && !double.IsFinite(number);
 
     private static string Serialize<T>(T value) =>
         JsonSerializer.Serialize(value, Wire.Json);

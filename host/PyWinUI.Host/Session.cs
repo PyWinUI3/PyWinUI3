@@ -28,6 +28,7 @@ internal sealed class Session
     private readonly StdioChannel _channel;
     private readonly FormRenderer _renderer;
     private readonly QueryExecutor _queries;
+    private readonly MicroRuntime _micro;
 
     private long _rev;
     private bool _handshaken;
@@ -42,8 +43,9 @@ internal sealed class Session
         _renderer = new FormRenderer(
             window,
             Emit,
-            message => HostLog.Write("[warn] " + message),
+            Warn,
             (code, message, nodeId) => Send(Outbound.Error(code, message, nodeId)));
+        _micro = new MicroRuntime(_renderer, Emit, Send);
 
         _window.Closed += OnWindowClosed;
     }
@@ -67,7 +69,8 @@ internal sealed class Session
             return;
         }
 
-        HostLog.Write("<< " + Truncate(line));
+        // 逐条报文只走 TRACE 级：默认不落盘，避免每条消息一次同步磁盘 IO
+        HostLog.Trace("<< " + Truncate(line));
 
         InboundMessage message;
         try
@@ -86,9 +89,29 @@ internal sealed class Session
 
             return;
         }
+        catch (Exception ex)
+        {
+            // Inbound 里不只有 ProtocolException：JsonNode.Parse、强制转换、
+            // GetDouble 都可能抛别的异常。让它逃出读线程会被收尾成 Closed，
+            // 宿主静默退出，Python 只看到 bye，日志里连原因都没有。
+            HostLog.Write(ex, "[protocol] 解析异常");
+            Send(Outbound.Error("bad-json", $"消息无法解析: {ex.Message}", null));
+            return;
+        }
 
         // 解析在后台线程完成，渲染必须回 UI 线程
-        _dispatcher.TryEnqueue(() => Handle(message));
+        _dispatcher.TryEnqueue(() =>
+        {
+            try
+            {
+                Handle(message);
+            }
+            catch (Exception ex)
+            {
+                HostLog.Write(ex, "[session] 处理消息失败");
+                Send(Outbound.Error("internal", $"处理 {message.GetType().Name} 失败: {ex.Message}", null));
+            }
+        });
     }
 
     private void Handle(InboundMessage message)
@@ -117,7 +140,9 @@ internal sealed class Session
             case PatchMessage patch:
                 _rev = patch.Rev;
                 _renderer.Apply(patch);
-                Send(Outbound.Ack(patch.Rev));
+                // 不再逐 patch 回 ack：Python 侧从来不消费它（App._dispatch 直接忽略），
+                // 却要为每条付出一次 JSON 构造 + 管道 Flush + 对端 decode + 队列。
+                // ack 现在只作为 render 的「首帧已应用」信号保留。
                 break;
 
             case InvokeMessage invoke:
@@ -128,9 +153,21 @@ internal sealed class Session
                 HandleQuery(query);
                 break;
 
+            case MicroMessage micro:
+                _micro.Run(micro);
+                break;
+
+            case UnknownMessage unknown:
+                // 协议第 7 章：新增 op 不算不兼容变更。旧端忽略即可，
+                // 不能像以前那样把 bad-protocol 当致命错误直接掐断会话。
+                Warn($"宿主不支持消息 op \"{unknown.Op}\"，已忽略（建议同步升级宿主）");
+                break;
+
             case DialogMessage dialog:
+                // 模态对话框关闭后 Python 侧不做任何同步等待，回 ack 没有意义；
+                // 协议 2.2 也写明 dialog 不回 ack（它在 ShowDialog 里才结束时，
+                // 这条 ack 已经晚到，纯属多一条出站流量）。
                 ShowDialog(dialog);
-                Send(Outbound.Ack(_rev));
                 break;
 
             case CloseMessage close:
@@ -214,6 +251,10 @@ internal sealed class Session
                             break;
                     }
 
+                    break;
+
+                case "select_tab":
+                    HandleSelectTab(invoke, element);
                     break;
 
                 case "scroll_to":
@@ -326,6 +367,42 @@ internal sealed class Session
         catch (Exception ex)
         {
             Send(Outbound.Error("internal", $"invoke {invoke.Method} 失败: {ex.Message}", invoke.Id));
+        }
+    }
+
+    /// <summary>
+    /// 选中标签页 / 固定选项卡。
+    ///
+    /// 两者都是 TabViewItem，直接把 TabView.SelectedItem 指过去；
+    /// 父级从渲染器的节点表取，而不是爬可视树——未选中的标签页往往还没实体化，
+    /// 爬树会找不到归属，表现为「select() 静默无效」。
+    ///
+    /// 用户绑了 tabSelected 时，SelectionChanged 会自己回事件，这里不再重复发；
+    /// 没绑时补一条，保证「调 select() 就有一条 tabSelected」的约定成立。
+    /// </summary>
+    private void HandleSelectTab(InvokeMessage invoke, FrameworkElement element)
+    {
+        if (element is not TabViewItem tab
+            || !_renderer.TryGetOwner(invoke.Id, out var owner)
+            || owner is not TabView tabs)
+        {
+            Send(Outbound.Error(
+                "bad-protocol",
+                $"select_tab 只能用于 TabPage / PinnedTab，收到 {element.GetType().Name}",
+                invoke.Id));
+            return;
+        }
+
+        var alreadyBound = _renderer.IsEventBound(invoke.Id, "tabSelected");
+        tabs.SelectedItem = tab;
+
+        if (!alreadyBound)
+        {
+            Emit(
+                invoke.Id,
+                "tabSelected",
+                new JsonObject { ["value"] = ExtendedControls.TabHeaderText(tab) },
+                false);
         }
     }
 
@@ -527,8 +604,62 @@ internal sealed class Session
 
     private void Send(string line)
     {
-        HostLog.Write(">> " + Truncate(line));
+        HostLog.Trace(">> " + Truncate(line));
         _channel.Send(line);
+    }
+
+    // ==================================================================
+    // 诊断回传
+    // ==================================================================
+
+    /// <summary>同一条告警在这个时间窗内只回传一次。</summary>
+    private static readonly TimeSpan WarnDedupWindow = TimeSpan.FromSeconds(1);
+
+    private readonly Dictionary<string, DateTime> _recentWarnings = new();
+    private DateTime _lastWarnCleanup = DateTime.UtcNow;
+
+    /// <summary>
+    /// 渲染层的非致命告警。写日志之外再回传一条 <c>t="warning"</c>：
+    /// 属性名拼错、控件类型写错、事件名写错这些如果只进 %TEMP% 文件，
+    /// 使用者永远看不见，库就会变成一台「静默失败」的机器。
+    ///
+    /// 去重是必要的：渲染循环里同一条告警可能每帧产生一次，
+    /// 不去重会把管道和 stderr 一起刷爆。窗口 1 秒。
+    /// </summary>
+    private void Warn(string message)
+    {
+        // 日志写在去重**之后**：旧实现放在最前面，渲染循环里同一条告警
+        // 每帧产生一次时，回传被挡住了，磁盘写却一次没少。
+        if (_closed)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+
+        // 顺带清理过期条目，避免长会话里这个字典无限增长
+        if ((now - _lastWarnCleanup).TotalSeconds > 10)
+        {
+            _lastWarnCleanup = now;
+            var stale = _recentWarnings
+                .Where(pair => (now - pair.Value) > TimeSpan.FromSeconds(5))
+                .Select(pair => pair.Key)
+                .ToList();
+            foreach (var key in stale)
+            {
+                _recentWarnings.Remove(key);
+            }
+        }
+
+        if (_recentWarnings.TryGetValue(message, out var last)
+            && (now - last) < WarnDedupWindow)
+        {
+            return;
+        }
+
+        _recentWarnings[message] = now;
+        HostLog.Write("[warn] " + message);
+        Send(Outbound.Warning(message));
     }
 
     private static string Truncate(string text) =>

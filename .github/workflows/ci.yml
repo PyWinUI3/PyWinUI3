@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    name: Python 单测
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 这些测试全部是纯内存的消息形状 / 行为断言，不需要宿主进程，
+      # 因此不需要 dotnet，也不需要桌面会话。
+      - name: 运行单元测试
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+        env:
+          PYTHONPATH: python
+
+  host:
+    name: 构建 WinUI 宿主
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      # 只验证「能编译、0 错误」，不做 publish：CI 不需要 138MB 产物，
+      # 也避免把 WindowsAppSDK 的运行时打包进构建缓存。
+      - name: dotnet build
+        run: dotnet build host/PyWinUI.Host/PyWinUI.Host.csproj -c Release -p:Platform=x64
+
+      # 协议层单测：纯 net8.0，不引 WinUI、不需要桌面会话。
+      # 测试项目直接链接宿主 Protocol/*.cs，测的就是线上那份实现，
+      # 覆盖 JSON 口径、错误分级、NaN 清洗、坏行不致命等回归点。
+      - name: C# 协议层单测
+        run: dotnet test host/PyWinUI.Host.Tests/PyWinUI.Host.Tests.csproj -c Release --nologo

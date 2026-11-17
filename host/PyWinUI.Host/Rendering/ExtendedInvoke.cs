@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 namespace PyWinUI.Host.Rendering;
 
@@ -72,6 +73,18 @@ internal static class ExtendedInvoke
                 }
                 return true;
 
+            // ---------------- 自动收缩侧栏 ----------------
+            case "set_open":
+                if (ValueParsers.AsBool(args?["open"]) is { } open)
+                {
+                    AutoCollapse.SetOpen(element, open);
+                }
+                return true;
+
+            case "release":
+                AutoCollapse.Release(element);
+                return true;
+
             // ---------------- 滚动 ----------------
             case "scroll_into_view":
                 var index = ValueParsers.AsInt(args?["index"]) ?? 0;
@@ -86,7 +99,64 @@ internal static class ExtendedInvoke
             case "execute_script":
                 if (element is WebView2 web && ValueParsers.AsString(args?["script"]) is { } script)
                 {
-                    _ = RunScriptAsync(web, script, nodeId, emit);
+                    _ = RunScriptAsync(web, script, nodeId, ValueParsers.AsString(args?["requestId"]), emit);
+                }
+                return true;
+
+            case "post_web_message":
+                if (element is WebView2 messageWeb && args?["message"] is { } payload)
+                {
+                    _ = WebView2Support.WithCore(messageWeb, core =>
+                    {
+                        if (payload is JsonValue scalar && scalar.TryGetValue<string>(out var text))
+                        {
+                            core.PostWebMessageAsString(text);
+                        }
+                        else
+                        {
+                            core.PostWebMessageAsJson(payload.ToJsonString());
+                        }
+                    }, warn);
+                }
+                return true;
+
+            case "open_devtools":
+                if (element is WebView2 devWeb)
+                {
+                    _ = WebView2Support.WithCore(devWeb, core => core.OpenDevToolsWindow(), warn);
+                }
+                return true;
+
+            case "respond_new_window":
+                if (element is WebView2 windowWeb
+                    && ValueParsers.AsString(args?["requestId"]) is { } windowId)
+                {
+                    WebView2Support.RespondNewWindow(
+                        windowWeb,
+                        windowId,
+                        ValueParsers.AsBool(args?["allow"]) ?? false,
+                        ValueParsers.AsString(args?["url"]));
+                }
+                return true;
+
+            case "respond_download":
+                if (element is WebView2 downloadWeb
+                    && ValueParsers.AsString(args?["downloadId"]) is { } downloadId)
+                {
+                    WebView2Support.RespondDownload(
+                        downloadWeb,
+                        downloadId,
+                        ValueParsers.AsBool(args?["allow"]) ?? true,
+                        ValueParsers.AsString(args?["filePath"]));
+                }
+                return true;
+
+            case "download_action":
+                if (element is WebView2 actionWeb
+                    && ValueParsers.AsString(args?["downloadId"]) is { } actionId
+                    && ValueParsers.AsString(args?["action"]) is { } action)
+                {
+                    WebView2Support.DownloadAction(actionWeb, actionId, action);
                 }
                 return true;
 
@@ -99,6 +169,7 @@ internal static class ExtendedInvoke
         WebView2 web,
         string script,
         string nodeId,
+        string? requestId,
         Action<string, string, JsonObject?, bool> emit)
     {
         try
@@ -109,14 +180,28 @@ internal static class ExtendedInvoke
             }
 
             var json = await web.CoreWebView2!.ExecuteScriptAsync(script);
-            emit(nodeId, "scriptResult", new JsonObject { ["result"] = json }, false);
+            emit(nodeId, "scriptResult", WithRequestId(new JsonObject
+            {
+                ["result"] = json,
+            }, requestId), false);
         }
         catch (Exception ex)
         {
-            emit(nodeId, "scriptResult", new JsonObject
+            emit(nodeId, "scriptResult", WithRequestId(new JsonObject
             {
                 ["error"] = ex.Message,
-            }, false);
+            }, requestId), false);
         }
     }
+
+    private static JsonObject WithRequestId(JsonObject data, string? requestId)
+    {
+        if (!string.IsNullOrEmpty(requestId))
+        {
+            data["requestId"] = requestId;
+        }
+
+        return data;
+    }
+
 }

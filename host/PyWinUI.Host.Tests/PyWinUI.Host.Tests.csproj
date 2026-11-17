@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      纯 net8.0，不带 -windows10.x TFM、不引 WinUI / WindowsAppSDK。
+      被测的 Protocol/*.cs 是纯协议逻辑（JSON 解析、分帧、错误分级），
+      不碰任何 XAML 类型，因此可以在 CI 的无桌面会话环境里直接跑。
+    -->
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!--
+    直接链接宿主的协议源码，而不是引用宿主 exe：
+    宿主是 WinExe + WindowsAppSDK 自包含，引用它会把整套桌面运行时拖进测试，
+    且测试代码没必要为 UI 类型付编译代价。链接源码保证测的就是线上那份实现。
+  -->
+  <ItemGroup>
+    <Compile Include="../PyWinUI.Host/Protocol/Wire.cs" Link="Protocol/Wire.cs" />
+    <Compile Include="../PyWinUI.Host/Protocol/Outbound.cs" Link="Protocol/Outbound.cs" />
+    <Compile Include="../PyWinUI.Host/Protocol/Inbound.cs" Link="Protocol/Inbound.cs" />
+    <Compile Include="../PyWinUI.Host/Protocol/FormModel.cs" Link="Protocol/FormModel.cs" />
+  </ItemGroup>
+
+</Project>

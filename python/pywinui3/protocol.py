@@ -18,7 +18,24 @@ CLIENT_ID = "pywinui3/0.1.0"
 #: 单行消息字节上限，与 C# 侧 Wire.MaxLineBytes 一致。
 MAX_LINE_BYTES = 8 * 1024 * 1024
 
-_encode = lambda obj: json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+def _encode(obj: Any) -> str:
+    """序列化一条消息。
+
+    ``allow_nan=False`` 是硬性要求：NaN / Infinity 不是合法 JSON，
+    小写 ``NaN`` 会被宿主当成语法错误整行丢弃，甚至（旧版）直接关掉会话。
+    与其让一个 ``float('nan')`` 走到管道里，不如在这里立刻炸出调用栈。
+    """
+    try:
+        return json.dumps(
+            obj,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "消息里有 NaN / Infinity，无法编码成 JSON（检查 Slider / NumberBox / 坐标等数值）"
+        ) from exc
 
 
 def encode(message: dict[str, Any]) -> bytes:
@@ -150,6 +167,59 @@ def op_move(node_id: str, parent: str, index: int) -> dict[str, Any]:
 
 def op_window(props: dict[str, Any]) -> dict[str, Any]:
     return {"t": "window", "props": props}
+
+
+# --------------------------------------------------------------------------
+# 微代码（宿主内执行的受限指令）
+# --------------------------------------------------------------------------
+
+#: 单条 program 允许的指令数上限。与 C# MicroRuntime.MaxOps 一致。
+MAX_MICRO_OPS = 64
+
+#: 指令白名单。宿主只认这四个，不做任何动态编译 / 反射 / IO。
+MICRO_INSTRUCTIONS = frozenset({"set", "animate", "wait", "emit"})
+
+#: animate 允许改的数值属性。范围窄是为了不让微代码变成任意属性写入口。
+MICRO_ANIM_PROPS = frozenset({"width", "height", "opacity"})
+
+#: 单条动画最长时长（毫秒）。与 C# MicroRuntime.MaxDurationMs 一致。
+MAX_MICRO_DURATION_MS = 5000
+
+
+def micro(
+    request_id: str,
+    node_id: str,
+    program: Iterable[dict[str, Any]],
+    *,
+    notify: bool = False,
+) -> dict[str, Any]:
+    """把一小段指令交给宿主在 UI 线程内执行，避免逐帧跨进程往返。
+
+    ``program`` 的元素形如 ``{"i": "animate", "prop": "width", "to": 200,
+    "ms": 320, "divisor": 15, "steps": 100}``。指令集是白名单，
+    不是可执行代码：宿主按固定语义解释，无法访问文件系统或任意 .NET API。
+
+    ``notify=True`` 时宿主执行完回一条 ``t="microDone"``（成功或失败都回）。
+    返回 request_id，调用方可据此等待回执。
+    """
+    ops = list(program)
+    if not ops:
+        raise ValueError("micro program 不能为空")
+    if len(ops) > MAX_MICRO_OPS:
+        raise ValueError(f"micro program 最多 {MAX_MICRO_OPS} 条指令")
+    for op in ops:
+        if op.get("i") not in MICRO_INSTRUCTIONS:
+            raise ValueError(f"未知 micro 指令: {op.get('i')!r}")
+
+    message: dict[str, Any] = {
+        "op": "micro",
+        "id": request_id,
+        "node": node_id,
+        "program": ops,
+    }
+    if notify:
+        message["notify"] = True
+    return message
 
 
 # --------------------------------------------------------------------------

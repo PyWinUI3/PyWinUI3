@@ -1,16 +1,17 @@
 # PyWinUI3
 
-本项目完全是ai许愿式编程瞎搞出来的，有什么问题欢迎来issues轰炸
+用 tkinter 的写法，画出真正的 WinUI 3 界面。
 
-用 tkinter 的写法，渲染真正的 WinUI 3 界面。
+Python 进程只描述控件树，一个独立的 C# 进程负责渲染窗口，两端通过 stdin/stdout 交换
+JSON Lines。`mainloop()` 的语义与 tkinter 一致；宿主崩溃不会带走 Python 解释器。
 
-Python 只描述控件树，一个独立的 C# WinUI 3 进程负责真正画窗口，两边通过 stdin/stdout 传 JSON Lines。`mainloop()` 的语义和 tkinter 一致，宿主崩了也不会带走 Python 解释器。
-
-- **平台**：Windows 10 19041 (2004) 及以上
-- **Python**：3.10+，仅用标准库，无第三方依赖
-- **协议**：[docs/protocol.md](docs/protocol.md) 是权威定义
-- **规模**：56 种控件类型、query/result 双向读回、键盘/焦点/拖放/窗口状态事件
-- **版本 / 许可**：0.1.0 · GPL-3.0-only
+| | |
+|---|---|
+| **平台** | Windows 10 19041 (2004) 及以上 |
+| **Python** | 3.10+，仅标准库，零第三方依赖 |
+| **协议** | [docs/protocol.md](docs/protocol.md) 是唯一权威定义 |
+| **能力** | 58 种控件、query/result 同步读回、micro 微代码、键盘/焦点/拖放/窗口状态事件 |
+| **版本 / 许可** | 0.1.0 · GPL-3.0-only |
 
 ```python
 import pywinui3 as ui
@@ -23,52 +24,78 @@ win.mainloop()
 
 ---
 
+## 目录
+
+1. [快速开始](#1-快速开始)
+2. [工作原理](#2-工作原理)
+3. [项目结构](#3-项目结构)
+4. [控件速查](#4-控件速查)
+5. [基础用法](#5-基础用法)
+6. [进阶用法](#6-进阶用法)
+7. [示例](#7-示例)
+8. [已知限制](#8-已知限制)
+9. [开发与验证](#9-开发与验证)
+10. [许可](#10-许可)
+
+---
+
 ## 1. 快速开始
 
 ### 1.1 前置条件
 
 | 需要 | 说明 |
 |---|---|
-| .NET SDK **8.0** | 只在构建宿主时需要，装 Runtime 不够 |
+| .NET SDK **8.0** | 只在构建宿主时需要；只装 Runtime 不够 |
 | Python **3.10+** | 无第三方依赖 |
 | Windows 10 **19041+** | 宿主基于 WinUI 3 / Windows App SDK 1.8 |
-| WebView2 Runtime | **仅当使用 `ui.WebView2`**；没装会自动降级，见 6.3 |
+| WebView2 Runtime | **仅使用 `ui.WebView2` 时需要**；没装会自动降级，见 [6.3](#63-webview2-与运行时降级) |
 
-工具链已在 Win10 21H2 / .NET 8.0.427 / WindowsAppSDK 1.8 上端到端验证过。
+工具链已在 Windows 10 21H2 / .NET 8.0.427 / Windows App SDK 1.8 上端到端验证。
 
 ### 1.2 构建与安装
+
+顺序是**先构建宿主，再装 Python 包**。`tools/build_host.ps1` 执行 `dotnet build -c Release`，
+把产物复制进 `python/pywinui3/runtime/PyWinUI.Host/`；打包时由 `python/MANIFEST.in` 递归
+收进该目录，`pyproject.toml` 的 `include-package-data` 一并带上。
+
+```powershell
+./tools/build_host.ps1          # 构建 Release 宿主 + 复制进 runtime/
+pip install .                   # 安装 wheel，宿主随包一起安装
+```
+
+开发时可用可编辑安装，此时不必跑构建脚本，Python 侧直接从源码树查找宿主：
 
 ```powershell
 dotnet build host/PyWinUI.Host/PyWinUI.Host.csproj -c Release
 pip install -e python
 ```
 
-输出的 `PyWinUI.Host.exe` 就是渲染宿主。工程预置了 `WindowsPackageType=None` +
-`WindowsAppSDKSelfContained=true`，所以它是**免安装的裸 exe**（约 138MB，含完整
-Windows App SDK 运行时），目标机器不必预装 Windows App Runtime。Python 侧会自动在源码树里
-找到它，也可以用环境变量 `PYWINUI3_HOST` 直接指定路径。
+产物 `PyWinUI.Host.exe` 就是渲染宿主。工程预设了 `WindowsPackageType=None` 与
+`WindowsAppSDKSelfContained=true`，因此它是**免安装的裸 exe**（约 138 MB，自带完整
+Windows App SDK 运行时），目标机器无需预装 Windows App Runtime。Python 侧会自动在源码树
+或包内 runtime 目录定位它，也可以用环境变量 `PYWINUI3_HOST` 直接指定路径。
 
-> 包名是 **`pywinui3`**（带 3，用来和另一个同名项目区分），导入写作
-> `import pywinui3 as ui`。C# 宿主的程序集名仍是 `PyWinUI.Host`，与包名无关。
+> Python 包名是 **`pywinui3`**（带 3，用于和同名项目区分），导入写作 `import pywinui3 as ui`。
+> C# 宿主的程序集名仍是 `PyWinUI.Host`，与包名无关。
 
-### 1.3 跑一个示例
+### 1.3 运行示例
 
 ```powershell
 python examples/01_hello.py
 ```
 
-想肉眼验收所有控件和事件，跑 `examples/02_controls.py`：操作任意控件都会弹窗回报
+想肉眼验收全部控件与事件，运行 `examples/02_controls.py`：操作任意控件都会弹窗回报
 「哪个控件、什么事件、当前值」。
 
 ---
 
 ## 2. 工作原理
 
-Python 里的 Windows 桌面 UI 选择很有限：tkinter 老了，PyQt 授权重，Web 套壳要拖一个浏览器。
-WinUI 3 是当前 Windows 上原生感最好的框架，但只有 C# / C++ 能用。于是把两件事拆开：
+Python 桌面 UI 的选择有限：tkinter 老旧，PyQt 授权重，Web 套壳要拖一个浏览器。
+WinUI 3 在 Windows 上是原生感最好的方案，却只有 C# / C++ 能用。PyWinUI3 把两件事拆开：
 
-- **Python 只管描述界面**——控件树、属性、回调，全是普通 Python 对象
-- **C# 只管渲染**——独立进程，接收界面描述并画出来
+- **Python 负责描述界面**——控件树、属性、回调，都是普通 Python 对象；
+- **C# 负责渲染**——独立进程，接收界面描述并绘制。
 
 ```
 ┌─ Python 进程 ────────────────────────────────┐
@@ -82,8 +109,8 @@ WinUI 3 是当前 Windows 上原生感最好的框架，但只有 C# / C++ 能�
               WinUI 3 / Windows App SDK
 ```
 
-界面用「表单」描述：一棵扁平的节点列表，父子关系靠 `children` 字段表达。
-首帧发全量 `render`，之后只发增量 `patch`：
+界面用「表单」描述：一棵扁平节点列表，父子关系由 `children` 字段表达。首帧发全量
+`render`，之后只发增量 `patch`：
 
 ```json
 {"op":"patch","rev":2,"ops":[
@@ -95,39 +122,45 @@ WinUI 3 是当前 Windows 上原生感最好的框架，但只有 C# / C++ 能�
 节点有稳定 id，宿主维护 `id → 控件实例` 的映射，补丁按 id 定位；事件按
 `(nodeId, eventName)` 回传并分发到 Python 回调。完整定义见 [docs/protocol.md](docs/protocol.md)。
 
-### 两个设计取舍
+### 为什么是两个进程，而不是 pythonnet 进程内加载
 
-**为什么是两个进程，而不是 pythonnet 进程内加载？** 这是整个设计里最关键的取舍。
-WinUI 3 的 `Application.Start()` 会把调用线程整个吃掉去跑消息泵：用 pythonnet 在 Python
-进程里起 CLR 再起 WinUI，Python 主线程就被这个泵占了，`mainloop()` 只能靠 hack 模拟，
-GIL 和 XAML 回调线程交织后死锁极难排查；而且 UI 层一个异常会直接带走 Python 解释器。
-分成两个进程后，Python 侧只依赖标准库，`mainloop()` 天然就是「主线程阻塞在事件队列上」，
-宿主崩了能被检测、能重启。代价是跨进程往返，本地管道单程 0.1–0.5ms，对 UI 可忽略。
+这是整个设计里最关键的取舍。WinUI 3 的 `Application.Start()` 会把调用线程整个吃掉去跑
+消息泵：用 pythonnet 在 Python 进程内起 CLR 再起 WinUI，Python 主线程就被这个泵占了，
+`mainloop()` 只能靠 hack 模拟，GIL 与 XAML 回调线程交织后的死锁极难排查；而且 UI 层一个
+异常会直接带走 Python 解释器。
 
-**为什么用 stdin/stdout 而不是命名管道？** Python 标准库没有 Windows 命名管道的实现，
-用 `ctypes` 调 Win32 API 太重；TCP 会占端口还可能被防火墙拦。stdin/stdout 零依赖，
-句柄生命周期天然绑定进程，对端一死立刻读到 EOF，连心跳包都省了——LSP 用的也是这套。
+拆成两个进程后，Python 侧只依赖标准库，`mainloop()` 天然就是「主线程阻塞在事件队列上」，
+宿主崩溃可被检测、可恢复。代价是跨进程往返——本地管道单程 0.1–0.5 ms，对 UI 可忽略。
+
+### 为什么用 stdin/stdout，而不是命名管道或 TCP
+
+Python 标准库没有 Windows 命名管道的实现，用 `ctypes` 调 Win32 API 太重；TCP 会占端口，
+还可能被防火墙拦截。stdin/stdout 零依赖，句柄生命周期天然绑定进程，对端一死立刻读到
+EOF，连心跳包都省了——LSP 用的也是这套。
 
 ---
 
 ## 3. 项目结构
 
 ```
-host/PyWinUI.Host/        C# WinUI 3 渲染宿主
-  App.xaml(.cs)           入口、加载小窗、XAML 元数据
-  Protocol/               消息 DTO 与解析
-  Transport/              stdin/stdout 行分帧
-  Rendering/              控件工厂、属性映射、增量补丁、WebView2 探测
-  Interop/                事件回传
-  Session.cs              消息循环与 invoke 分发
-python/pywinui3/          Python 库（包名带 3）
-  protocol.py             协议编解码
-  transport.py            宿主进程与管道
-  app.py                  生命周期与事件循环
-  window.py / widgets.py / layout.py / variables.py
-docs/protocol.md          协议权威定义
-examples/                 9 个可运行示例
-tests/                    单测 + 两个端到端 smoke
+host/PyWinUI.Host/            C# WinUI 3 渲染宿主
+  Protocol/                   消息类型与解析（纯逻辑，可独立单测）
+  Transport/                  stdin/stdout 行分帧
+  Rendering/                  控件工厂、属性映射、增量补丁、WebView2、微代码
+  Interop/                    事件回传
+  Session.cs                  消息循环与 invoke 分发
+host/PyWinUI.Host.Tests/      xUnit 协议层单测（纯 net8.0，不依赖桌面会话）
+python/pywinui3/              Python 库（包名带 3）
+  protocol.py / transport.py  协议编解码、宿主进程与管道
+  app.py                      生命周期、事件循环、16ms patch 合并窗口
+  window.py / widgets.py / extended.py / layout.py / variables.py
+  runtime/PyWinUI.Host/       构建脚本复制进来的宿主产物（随 wheel 打包）
+python/MANIFEST.in            递归包含 runtime/
+.github/workflows/ci.yml      Python 单测 + 宿主编译 + C# 协议层单测
+docs/protocol.md              协议权威定义
+examples/                     10 个可运行示例（01~10）
+tests/                        单测 + 端到端 smoke + 拖拽回归
+tools/build_host.ps1          构建 Release 宿主 + 复制进 runtime/
 ```
 
 ---
@@ -155,13 +188,14 @@ tests/                    单测 + 两个端到端 smoke
 | 进度 | `ProgressBar` `ProgressRing` |
 | 内容 | `Image` `Media` `WebView2` `Separator` |
 
-**扩展控件**（共 33 种，都是 WinUI 3 / Windows App SDK 1.8 内置类型）
+**扩展控件**（共 35 种，均为 WinUI 3 / Windows App SDK 1.8 内置类型，含 2 类标签元素）
 
 | 分组 | 类 |
 |---|---|
 | 表单输入 | `NumberBox` `PasswordBox` `RichTextBlock` `RichEditBox` `AutoSuggestBox` `DatePicker` `TimePicker` `CalendarDatePicker` `CalendarView` `RatingControl` `ColorPicker` |
 | 按钮 / 头像 | `DropDownButton` `ToggleSplitButton` `PersonPicture` |
 | 数据 / 导航 | `GridView` `FlipView` `Pivot` `TabView` `TreeView` `NavigationView` `MenuBar` `CommandBar` `BreadcrumbBar` `ItemsView` `RadioButtons` `SelectorBar` |
+| 标签元素（`TabView` 子节点） | `PinnedTab` `TabPage` |
 | 信息 / 容器 | `InfoBar` `Expander` `BorderBox` `Viewbox` `RelativePanel` `TwoPaneView` `RefreshContainer` |
 
 **变量与工具**：`StringVar` `IntVar` `DoubleVar` `BooleanVar`、`Event`、`dialog()`、
@@ -169,7 +203,7 @@ tests/                    单测 + 两个端到端 smoke
 
 ---
 
-## 5. 基本用法
+## 5. 基础用法
 
 ### 5.1 窗口
 
@@ -189,12 +223,12 @@ win.on_resize(lambda e: print(e.data["width"], e.data["height"]))
 win.on_close(lambda e: print("要关了"))   # 关闭前触发，首版不能取消
 ```
 
-`Window(layout="grid")` 让窗口根节点直接成为 Grid，这是做「侧栏 + 内容区」整屏布局的关键，
-见 6.4。
+`Window(layout="grid")` 让窗口根节点直接成为 Grid，这是实现「侧栏 + 内容区」整屏布局的
+关键，见 [6.4](#64-可收缩侧栏与宽度动画)。
 
 ### 5.2 布局与滚动
 
-整窗滚动默认开着：内容比窗口高时自动出滚动条，不用自己包一层。
+整窗滚动默认开启：内容比窗口高时自动出现滚动条，无需自己包一层。
 
 ```python
 win = ui.Window(title="长表单")          # scroll=True 是默认值
@@ -211,18 +245,19 @@ for line in lines:
     ui.Label(box, line)
 ```
 
-`Window(scroll=False)` 关掉整窗滚动（超出部分会被裁切）；运行中 `win.scroll = False` 也能切。
+`Window(scroll=False)` 关闭整窗滚动（超出部分被裁切）；运行中 `win.scroll = False`
+也能切换。
 
 ### 5.3 事件、变量与弹窗
 
-`command=` 无参，和 tkinter 一致；`bind()` 的回调收到 `Event` 对象：
+`command=` 无参，与 tkinter 一致；`bind()` 的回调收到 `Event` 对象：
 
 ```python
 entry.bind("change", lambda e: print(e.text))
 entry.bind("submit", lambda e: print("回车了", e.text))
 ```
 
-`StringVar` `IntVar` `DoubleVar` `BooleanVar` 支持双向绑定：
+`StringVar` / `IntVar` / `DoubleVar` / `BooleanVar` 支持双向绑定：
 
 ```python
 name = ui.StringVar("world")
@@ -235,13 +270,12 @@ ui.dialog("控件事件", "Button 被点击了")
 ```
 
 `dialog()` 是模态的，会阻塞窗口交互，适合演示和调试；生产界面请用界面内的状态文字。
-第四个参数 `kind` 可选 `info` / `warn` / `error` / `success`，图标、颜色和按钮文字都不同。
+第四个参数 `kind` 可选 `info` / `warn` / `error` / `success`，图标、颜色与按钮文字各不相同。
 
 ### 5.4 读取运行时状态
 
-界面的「设定值」和「真实状态」不是一回事：`width=200` 是设定值，
-布局完成后可能只有 184；`web.source` 是你写进去的目标，浏览器里的地址可能已经跳走。
-`query()` 直接问宿主：
+界面的「设定值」与「真实状态」不是一回事：`width=200` 是设定值，布局完成后可能只有 184；
+`web.source` 是写进去的目标，浏览器里的地址可能已经跳转。`query()` 直接问宿主：
 
 ```python
 btn = ui.Button(win, "确定")
@@ -254,18 +288,18 @@ print(win.state, win.is_maximized, win.is_active)
 print(win.window_bounds)                     # {"x","y","width","height"}
 ```
 
-常用键：`actualWidth` / `bounds` / `isLoaded` / `isVisible` / `isEnabled` /
-`text` / `value` / `checked` / `selectedIndex` / `selectedItems` /
-`selectionStart` / `selectionLength` / `selectedText` / `itemCount` /
-`date` / `time` / `color` / `currentUrl` / `canGoBack` / `canGoForward` /
-`position` / `duration` / `isPlaying` / `verticalOffset` / `controlType` / `dpiScale`
-（完整清单见 [docs/protocol.md](docs/protocol.md) 3.7）。
+常用键：`actualWidth` / `bounds` / `isLoaded` / `isVisible` / `isEnabled` / `text` /
+`value` / `checked` / `selectedIndex` / `selectedItems` / `selectionStart` /
+`selectionLength` / `selectedText` / `itemCount` / `date` / `time` / `color` /
+`currentUrl` / `canGoBack` / `canGoForward` / `position` / `duration` / `isPlaying` /
+`verticalOffset` / `controlType` / `dpiScale`（完整清单见
+[协议 3.7](docs/protocol.md#37-query-键清单)）。
 
-各控件也封装了常用读取：`entry.selection`、`entry.selected_text`、
-`web.can_go_back`、`web.browser_url`、`media.duration`、`media.is_playing`、
-`scroll.vertical_offset`、`list.selected_item`。
+各控件也封装了常用读取：`entry.selection`、`entry.selected_text`、`web.can_go_back`、
+`web.browser_url`、`media.duration`、`media.is_playing`、`scroll.vertical_offset`、
+`list.selected_item`。
 
-窗口动作和状态事件：
+窗口动作与状态事件：
 
 ```python
 win.maximize(); win.restore(); win.minimize(); win.activate()
@@ -273,11 +307,11 @@ win.on_state_changed(lambda e: print(e.data["state"]))
 win.on_activate(lambda e: print("焦点", e.data["active"]))
 ```
 
-`query()` 是**同步**的（默认 2 秒超时），会阻塞主线程直到宿主回 `result`。
-等待期间到达的事件不会丢，会暂存到内部队列、下一轮事件循环照常派发，
-所以在回调里调用也安全。读不到值会抛 `UiError`，不会假装读到 `None`。
+`query()` 是**同步**的（默认 2 秒超时），会阻塞主线程直到宿主回 `result`。等待期间到达的
+事件不会丢，会暂存到内部队列、下一轮事件循环照常派发，因此在回调里调用也安全。读不到值
+会抛 `UiError`，不会假装读到 `None`。
 
-新事件面也一并补齐了：键盘、焦点、加载、尺寸、拖放、指针：
+事件面同时覆盖了键盘、焦点、加载、尺寸、拖放与指针：
 
 ```python
 entry.on_key_down(lambda e: print(e.data["key"], e.data["ctrl"]))
@@ -301,11 +335,10 @@ ui.Button(col, "图标按钮", icon="\uE713")         # 只有图标
 ui.Button(col, "自定义", background="#0F6E56")    # 任意颜色
 ```
 
-自定义背景色会连同 hover / 按下两个状态一起覆盖——只设 `Background` 的话，
-鼠标移上去会变回系统默认色。`icon` 用 Segoe Fluent Icons 的码点，WinUI 自带该字体，
-不需要额外资源文件。
+自定义背景色会连同 hover / 按下两个状态一起覆盖——只设 `Background` 的话，鼠标移上去会
+变回系统默认色。`icon` 用 Segoe Fluent Icons 码点，WinUI 自带该字体，无需额外资源文件。
 
-悬停提示与右键菜单对**所有控件**都可用，也可以直接在构造时传 `tooltip=`：
+悬停提示与右键菜单对**所有控件**都可用，也可在构造时直接传 `tooltip=`：
 
 ```python
 btn = ui.Button(col, "删除")
@@ -342,8 +375,8 @@ save.on_menu(lambda e: print("右半边：", e.data["value"]))
 ui.RepeatButton(col, "+", repeat_interval=80)        # 按住连续触发
 ```
 
-`ToggleButton` 和 `Checkbox` 都是开/关，区别是前者当模式开关（工具栏加粗、视图切换），
-后者当表单选项。`RepeatButton` 的 `click` 在按住期间会不断回传，回调里别做重活。
+`ToggleButton` 与 `Checkbox` 都是开/关：前者当模式开关（工具栏加粗、视图切换），后者当
+表单选项。`RepeatButton` 的 `click` 在按住期间不断回传，回调里别做重活。
 
 ### 6.2 进度、图片、媒体与列表
 
@@ -358,8 +391,8 @@ ui.ProgressRing(col, size=40)                     # 不确定态加载圈
 ring.active = False                               # 停下
 ```
 
-**图片**：`src` 除本地路径和 URL 外，还接受 `data:image/png;base64,...`——
-程序里算出来的图（截图、图表）可以直接贴上去，不必先写临时文件。
+**图片**：`src` 除本地路径和 URL 外，还接受 `data:image/png;base64,...`——程序里算出来的
+图（截图、图表）可直接贴上去，不必先写临时文件。
 
 ```python
 ui.Image(col, src="data:image/png;base64," + b64, height=120)
@@ -373,7 +406,7 @@ player = ui.Media(col, src=r"C:\videos\demo.mp4", height=360)
 player.play()
 player.pause()
 player.stop()
-player.seek(30)              # 跳到第 30 秒；也可以 player.position = 30
+player.seek(30)              # 跳到第 30 秒；也可 player.position = 30
 player.volume = 0.6
 player.loop = True
 player.muted = False
@@ -384,10 +417,10 @@ player.bind("mediaEnded", lambda e: print("放完了"))
 player.bind("mediaFailed", lambda e: print("失败", e.data["error"]))
 ```
 
-本地路径和 http(s) URL 都支持。`show_controls=True`（默认）用系统自带的
-播放/暂停/进度条；关掉就可以用自己的按钮通过 `play()` / `pause()` 控制。
+本地路径与 http(s) URL 都支持。`show_controls=True`（默认）使用系统自带的播放/暂停/进度条；
+关掉后可用自己的按钮通过 `play()` / `pause()` 控制。
 
-**单选框**：同一个 `group` 自动互斥，不需要手动取消其它项。
+**单选框**：同一个 `group` 自动互斥，无需手动取消其它项。
 
 ```python
 ui.Radio(col, "选项甲", group="g1", checked=True)
@@ -395,7 +428,7 @@ ui.Radio(col, "选项乙", group="g1")
 ui.Radio(col, "选项丙", group="g1")
 ```
 
-**列表项图标**：`items` 既可以传字符串，也可以传带图标的对象，可混用。
+**列表项图标**：`items` 既可传字符串，也可传带图标的对象，可混用。
 
 ```python
 ui.ListBox(col, [
@@ -414,38 +447,69 @@ web.reload()
 web.go_back()
 web.go_forward()
 
-print(web.source)        # 你最后一次写进去的目标地址
+print(web.source)        # 最后一次写进去的目标地址
 print(web.current_url)   # 浏览器当前的真实地址（含页面内跳转、重定向）
 web.on_navigate(lambda e: print(e.data["url"], e.data["isSuccess"]))
 web.navigate_to_string("<h1>Hello</h1>")   # 直接渲染一段 HTML
 ```
 
-`source` 和 `current_url` 不是一回事：前者是你设的目标，后者是宿主从浏览器
-导航事件里回报的**实际地址**。页面里点链接、服务端重定向、JS 改 `location.hash`
-之后两者会不同。宿主订阅了 `navigationStarting` / `navigationCompleted` /
-`sourceChanged` 三类事件；`web.on_navigate(fn)` 是绑 `navigationCompleted` 的快捷方式，
-`data` 里还有 `isSuccess` 和 `httpStatusCode`。`current_url` 的同步不占用用户回调，
-你照样可以 `web.bind("sourceChanged", fn)` 而不会把它弄坏。
+`source` 与 `current_url` 不是一回事：前者是设定的目标，后者是宿主从导航事件回报的**实际
+地址**。页面里点链接、服务端重定向、JS 改 `location.hash` 之后两者会不同。宿主订阅了
+`navigationStarting` / `navigationCompleted` / `sourceChanged` 三类事件；`on_navigate(fn)`
+是绑 `navigationCompleted` 的快捷方式，`data` 里还有 `isSuccess` 与 `httpStatusCode`。
+`current_url` 的同步不占用用户回调，照样可以 `web.bind("sourceChanged", fn)`。
 
-`navigate_to_string()` 直接渲染 HTML 字符串，不需要文件或本地服务器；这类页面
-没有真实地址，`current_url` 通常是 `about:blank`。
+`navigate_to_string()` 直接渲染 HTML 字符串，不需要文件或本地服务器；这类页面没有真实
+地址，`current_url` 通常是 `about:blank`。
 
-控件由 WinUI 3 的 `WebView2` 承载，背后是系统安装的 Edge WebView2 Runtime；
-本项目**不打包、也不会替你安装**运行时。宿主在创建节点时探测：
+**页面 ↔ Python 双向通信**：页面 `window.chrome.webview.postMessage(x)` 会触发 `webMessage`
+事件；Python 用 `post_message()` 往页面发消息。字符串与结构化值都支持（要求
+`isWebMessageEnabled=True`，默认开启）。
+
+```python
+web.on_message(lambda e: print("页面说：", e.data["data"]))
+web.post_message({"type": "ping", "seq": 1})
+rid = web.execute_script("document.title")          # scriptResult 会带回 rid
+```
+
+**新窗口与下载**都由 Python 回执决定：
+
+```python
+def on_open(e):
+    web.respond_new_window(e.data["requestId"], allow=True)   # 在当前视图打开
+
+web.on_new_window_request(on_open)
+
+def on_download(e):
+    did = e.data["downloadId"]
+    web.respond_download(did, allow=True, file_path=r"D:\out\a.bin")
+
+web.on_download_starting(on_download)
+web.on_download_progress(lambda e: print(e.data["bytesReceived"]))
+web.on_download_state_changed(lambda e: print(e.data["state"]))
+```
+
+还有 `contentLoading` / `domContentLoaded` / `processFailed` 事件、`download_action()`
+（暂停/恢复/取消）、`open_devtools()`，以及 `muted` / `user_agent` / `script_enabled` /
+`context_menus_enabled` / `web_message_enabled` / `zoom_control_enabled` 等设置（Core 就绪前
+自动缓存）。完整语义见 [协议 3.5.5](docs/protocol.md#355-webview2-扩展能力)。
+`permissionRequested` 暂未接；WinUI 3 不暴露程序化 `zoomFactor`。
+
+**运行时降级**：控件由 WinUI 3 的 `WebView2` 承载，背后是系统安装的 Edge WebView2
+Runtime；本项目**不打包、也不替你安装**运行时。宿主在建节点时探测：
 
 - 装了 → 正常渲染网页，支持 `https://` / `file:///` / `http://localhost`；
 - 没装 → 该控件自动换成灰色矩形，居中显示「加载失败」，下方一行
-  `该控件无法正常加载：Webview2 Runtime未找到。` 其余界面照常工作，不白屏、不崩溃，
+  `该控件无法正常加载：Webview2 Runtime未找到。`，其余界面照常工作，不白屏、不崩溃，
   此时该控件的方法调用是安全的空操作。
 
-不想卸载运行时也能验证降级：启动前设 `PYWINUI3_WEBVIEW2_FALLBACK=1`，
-或直接跑 `examples/09_webview2.py`。探测规则见 [docs/protocol.md](docs/protocol.md) 3.5.3，
-导航事件与地址回传见 3.5.4。
+不想卸载运行时也能验证降级：启动前设 `PYWINUI3_WEBVIEW2_FALLBACK=1`，或直接跑
+`examples/09_webview2.py`。探测规则见 [协议 3.5.3](docs/protocol.md#353-webview2-的运行时降级)。
 
 ### 6.4 可收缩侧栏与宽度动画
 
-`ListBox(auto_collapse=True)` 让列表自己当侧栏：鼠标移进去展开、点中某项后钉住、
-点内容区才收起。宽度按 20 步指数缓出动画变化（`w += (end_w - w) / 3`，最后一步 snap）。
+`ListBox(auto_collapse=True)` 让列表自己当侧栏：鼠标移进去展开、点中某项后钉住、点内容区
+才收起。宽度以 100 步指数缓出变化，总时长 320 ms，最后一步 snap 到目标值。
 
 ```python
 win = ui.Window(title="工具", layout="grid", scroll=False,
@@ -454,7 +518,7 @@ win = ui.Window(title="工具", layout="grid", scroll=False,
 nav = ui.ListBox(win, [
     {"text": "概览", "glyph": "\uE80F"},
     {"text": "任务", "glyph": "\uE9D5"},
-], width=200, auto_collapse=True, collapsed_width=56)
+], width=200, auto_collapse=True, collapsed_width=40)
 nav.grid(row=0, column=0)
 
 body = ui.Scroll(win, padding=20)      # 右侧内容区，独立滚动
@@ -462,23 +526,26 @@ body.grid(row=0, column=1)
 body.bind("pointerPressed", lambda e: nav.release())   # 点内容区收起
 ```
 
-`layout="grid"` 是关键：窗口根节点直接就是 Grid，`*` 行列才拿得到真实剩余高度。
-普通 `Grid(win)` 会被窗口的 StackPanel 包一层，高度变成无限，里面的东西撑不满也滚不动。
+`layout="grid"` 是关键：窗口根节点直接就是 Grid，`*` 行列才拿得到真实剩余高度。普通
+`Grid(win)` 会被窗口的 StackPanel 包一层，高度变成无限，里面的东西撑不满也滚不动。
 
-宽度必须显式给，且大于 `collapsed_width`——折叠只改宽度，不给宽度就没有「展开态」。
-不想要悬停行为就 `hover_expand=False`，改用 `nav.toggle()` / `nav.set_open(True/False)`。
+宽度必须显式给定，且大于 `collapsed_width`——折叠只改宽度，不给宽度就没有「展开态」。
+不想要悬停行为就用 `hover_expand=False`，改用 `nav.toggle()` / `nav.set_open(True/False)`。
 
 这套动画任意控件都能单独调：
 
 ```python
-panel.animate_width(56)                       # 20 步缓出到 56
+panel.animate_width(56)                       # 一条 micro，宿主本地跑完缓出
 panel.animate_width(200, steps=12, interval=24)
 ```
 
+`animate_width()` 早期实现是每步发一条 `patch`（20 步就是 20 次往返 + 20 条 ack）；现在只发
+**一条 `micro` 消息**，把整段补间交给宿主本地跑完，见 [6.7](#67-性能设计与微代码)。
+
 ### 6.5 扩展控件
 
-第 4 章列了 33 个扩展控件，用法和基础控件完全一致——构造传属性、
-赋值发 patch、`bind()` 挂事件、`query()` 读状态。几组典型写法：
+第 4 章列出的扩展控件（含 2 类 `TabView` 标签元素，见 [6.6](#66-标签页))用法与基础控件完全
+一致——构造传属性、赋值发 patch、`bind()` 挂事件、`query()` 读状态。几组典型写法：
 
 ```python
 # 表单输入：数值、日期、评分、颜色、建议列表
@@ -504,9 +571,8 @@ ui.TreeView(col, items=[{"label": "根", "children": ["子1", "子2"]}], height=
 ui.NavigationView(col, items=["首页", "设置"], pane_display_mode="left")
 ```
 
-`TreeView` 的 `items` 用 `{"label": ..., "children": [...]}` 表达层级；
-`MenuBar` / `CommandBar` 的条目点击绑在父控件上，事件名是 `click`，
-用 `e.data["index"]` 区分点的是哪一项。
+`TreeView` 的 `items` 用 `{"label": ..., "children": [...]}` 表达层级；`MenuBar` /
+`CommandBar` 的条目点击绑在父控件上，事件名是 `click`，用 `e.data["index"]` 区分点的是哪一项。
 
 ```python
 # 信息 / 容器：提示条、折叠面板、带背景的盒子
@@ -521,9 +587,8 @@ ui.Label(box, "BorderBox 里的子控件")
 ```
 
 `BorderBox` / `Viewbox` / `Expander` / `NavigationView` / `TwoPaneView` /
-`RefreshContainer` 都能直接放子控件，和 `Column` 一样。
-`RelativePanel` 也开放了容器能力，但 WinUI 的附加对齐属性
-（`AlignLeftWithPanel` 等）暂未映射，见第 8 章。
+`RefreshContainer` 都能直接放子控件，和 `Column` 一样。`RelativePanel` 也开放了容器能力，
+但 WinUI 的附加对齐属性（`AlignLeftWithPanel` 等）暂未映射，见第 8 章。
 
 输入控件的增强能力：
 
@@ -536,6 +601,106 @@ entry.set_spellcheck(False)
 entry.configure(accepts_return=True, is_spell_check_enabled=False)
 ```
 
+### 6.6 标签页
+
+`TabView` 有两类专用子节点，控件总数因此从 56 增至 58：
+
+- **`PinnedTab`（固定选项卡）**：和 `TabPage` 一样是真正的 `TabViewItem`，同样有图标、
+  同样能放子控件，区别只在 `IsClosable=false`、`CanDrag=false`，以及按下时会临时关闭
+  整个标签条的重排。由于标签条内部重排没有可取消的公开事件，宿主额外记录每个固定标签的
+  规范顺序，一旦顺序被改动就复位：结果是**不可关闭、拖不动，且始终排在普通标签之前**。
+  属性 `text` / `icon` / `minWidth` / `maxWidth`；方法 `select()`。
+- **`TabPage`（标签页）**：渲染成可关闭的 `TabViewItem` 放进 `TabItems`，可拖动重排、
+  可关闭。`Content` 预置一层 StackPanel，**能放子控件**。属性 `text` / `closable` /
+  `icon` / `minWidth` / `maxWidth`；方法 `close()` / `select()`。
+
+两类标签的 `icon` 既可以是 Segoe 字形（如 `"\uE80F"`），也可以是本地图片路径
+（`.png` / `.jpg` / `.ico` / `.bmp` / `.svg`）；SVG 走 `SvgImageSource`，栅格化为 32 px
+后显示，高 DPI 下依然清晰。`min_width` / `max_width` 直接约束宽度，标题超出时显示省略号，
+但 `query("text")` 读回的仍是完整标题。
+
+```python
+tabs = ui.TabView(col, can_reorder_tabs=True, tab_width_mode="sizeToContent")
+
+# 固定选项卡：没有 ×，也拖不动，但同样是标签页、同样能放内容
+home = tabs.add_pinned("首页", icon="\uE80F")
+ui.Label(home, "固定页也能放子控件")
+
+page = tabs.add_page(
+    "一个会很长很长很长很长很长的标签标题",
+    icon="\uE8A5",
+    min_width=120, max_width=200,   # 超宽自动省略成 "一个会很长…"
+)
+ui.Label(page, "这里是标签内容")        # TabPage 能放子控件
+ui.Button(page, "确定")
+page.select()                          # 选中并回 tabSelected
+
+tabs.add_page("预览", icon="\uE8B7")
+tabs.bind("tabCloseRequested", lambda e: print("关了", e.data["value"]))
+```
+
+`add_page()` / `add_pinned()` 是便捷方法；`items=[...]` 仍是快捷写法，生成普通可关闭
+标签页、不能放子控件，**不要与 `TabPage` 子节点混用**，否则两组标签会同时出现。`TabView` 的
+`tab_width_mode` 支持 `equal`（默认）/ `sizeToContent` / `compact`。`select_tab` 对两类标签
+都能真正切换选中项并回一条 `tabSelected`；用户点关闭按钮时宿主回 `tabCloseRequested`
+（`data.value` 是标签文字，`data.nodeId` 是被关页的节点 id），默认内部钩子据此销毁对应
+`TabPage` 节点，用户仍可 `bind()` 收通知，二者不冲突。
+
+诚实限制：拖动重排由 WinUI 内置完成，宿主不回传重排事件，Python 侧 `children` 顺序不会
+自动同步；`TabPage` 构造时不支持 `selected=True`（请用 `select()`）；子标签一律追加，忽略
+协议 `insert` 的 `index`；固定标签被拖到别处时只在拖动结束那一刻归位，过程中会看到短暂位移。
+
+### 6.7 性能设计与微代码
+
+跨进程往返单程 0.1–0.5 ms，单看不贵，但「每帧 / 每步一条」会把它放大。这版做了几件事：
+
+- **`ack` 只在 `render` 成功后回一条**。`patch` 不再逐条回 ack（Python 侧本来就忽略），
+  `invoke` / `dialog` / `close` 也不发 ack。
+- **16 ms patch 合并窗口**。同帧对同一节点的多次属性赋值按节点合并，窗口结束合成一条
+  `patch` 发出；`query()` / `invoke` / `dialog` / `close` / `micro` 之前强制 flush，保证同步
+  读回看到最新状态。结构类 `insert` / `remove` / `move` 不参与合并，也不跨越它们合并。
+- **几何读取节流**。`actualWidth` / `actualHeight` / `bounds` 的 `UpdateLayout()` 在 16 ms
+  内最多跑一次，连读多个几何值不再重复全量布局。
+- **日志默认零磁盘 IO**。`HostLog.Write` 只记异常 / 生命周期 / 告警，使用长驻
+  StreamWriter；逐条报文 `<<` / `>>` 走 `HostLog.Trace`，默认不落盘，设
+  `PYWINUI3_TRACE=1` 才写 `%TEMP%/pywinui3-host-<pid>.log`（按进程分开）。
+- **`animate_width()` 一条消息跑完整段补间**（见 [6.4](#64-可收缩侧栏与宽度动画)），不再
+  每步一次往返。
+
+`micro` 把这件事推到极致：一段连续动作在宿主本地跑完，只有一条入站消息。
+
+```python
+panel = ui.Column(col, width=100)
+
+panel.micro([
+    {"i": "set",     "props": {"opacity": 0.0}},
+    {"i": "animate", "prop": "width", "to": 240.0, "ms": 300, "steps": 20},
+    {"i": "animate", "prop": "opacity", "to": 1.0, "ms": 200, "steps": 12},
+    {"i": "wait",    "ms": 100},
+    {"i": "emit",    "event": "revealed", "data": {"ok": True}},
+], notify=True)
+
+panel.animate_width(200, steps=12, interval=16)   # 底层就是一条 micro
+```
+
+`App.micro(node_id, program, notify=False)` 返回请求 id；`notify=True` 时宿主跑完回一条
+`microDone`（`id` / `ok` / `error`），缺省不回。`program` 的指令白名单只有四种：
+
+| `i` | 字段 | 语义 |
+|---|---|---|
+| `set` | `props` | 走与 patch 相同的属性链、带回声抑制，不许改 `events` |
+| `animate` | `prop`（width/height/opacity）+ `to` / `ms` / `steps` / `divisor` | 闭式解指数缓出，最后一步 snap |
+| `wait` | `ms` | 等待 |
+| `emit` | `event` + 可选 `data` | 主动回一条普通事件 |
+
+**micro 不是任意代码执行**：宿主按固定语义解释，不动态编译、不反射、不访问文件 / 网络 /
+进程。限额：`program` ≤ 64 条、单条 `set` ≤ 32 个属性、动画 ≤ 5000 ms / ≤ 1000 步、数值
+绝对值 ≤ 1e6 且拒绝 NaN / Infinity；目标节点必须存在；同一节点的新程序顶掉旧程序（代次）。
+形状校验失败回非终止的 `bad-micro`。
+
+告警走 `t:"warning"`（宿主对同一条 1 秒去重后才写日志），Python 侧默认打到 stderr，可用
+`App(on_warning=...)` 接管；未知 `op` 也是回一条 warning 后忽略，不终止会话。
+
 ---
 
 ## 7. 示例
@@ -544,95 +709,109 @@ entry.configure(accepts_return=True, is_spell_check_enabled=False)
 |---|---|
 | `examples/01_hello.py` | 最小示例：文字 + 按钮 + 回调改界面 |
 | `examples/02_controls.py` | 控件总览：所有控件摆一屏，操作任一个都弹窗回报「哪个控件、什么事件、当前值」 |
-| `examples/03_live.py` | 实时渲染：时钟/进度条/色块每 50ms 变一次，还能运行中动态插入控件 |
-| `examples/04_window_toolkit.py` | 窗口图标/位置/置顶、按钮图标、data URI 图片、媒体控制、悬停提示、右键菜单 |
+| `examples/03_live.py` | 实时渲染：时钟 / 进度条 / 色块每 50 ms 变一次，还能运行中动态插入控件 |
+| `examples/04_window_toolkit.py` | 窗口图标 / 位置 / 置顶、按钮图标、data URI 图片、媒体控制、提示与右键菜单 |
 | `examples/05_scroll.py` | 整窗滚动 + 局部滚动区 |
 | `examples/06_buttons.py` | ToggleButton / SplitButton / RepeatButton |
-| `examples/07_sidebar.py` | Grid 布局 + 可折叠 ListBox 侧边栏（20 步宽度动画） |
+| `examples/07_sidebar.py` | Grid 布局 + 可折叠 ListBox 侧边栏（宽度动画） |
 | `examples/08_load_fail.py` | 加载 → 失败：加载圈 0.5 秒保底 + 失败错误界面 |
-| `examples/09_webview2.py` | WebView2 网页视图：当前网址 / 导航事件 / HTML 字符串 / 缺运行时的灰色降级页 |
-| `examples/10_extended_controls.py` | 33 个扩展控件 + query 读回 + 键盘/焦点/窗口状态事件 |
+| `examples/09_webview2.py` | WebView2：当前网址 / 导航事件 / HTML 字符串 / 缺运行时的灰色降级页 |
+| `examples/10_extended_controls.py` | 扩展控件总览 + query 读回 + 键盘/焦点/窗口状态事件 |
 
-`02_controls.py` 是肉眼验收用的，`03_live.py` 用来确认「实时」这件事：全程没有手动刷新调用。
+`02_controls.py` 用于肉眼验收；`03_live.py` 用来确认「实时」这件事——全程没有手动刷新调用。
 
 ---
 
 ## 8. 已知限制
 
-- **`pack()` 只做语义子集**。WinUI 没有 tkinter 的几何管理器，`pack` 的 `side` 不参与布局计算，
-  只把 `padx/pady` 翻译成 margin、`fill` 翻译成对齐。新代码建议直接用 `Column` / `Row` / `Grid`。
-- **`place()` 不实现**。WinUI 没有绝对定位，会直接抛 `NotImplementedError`。
-- **Windows 10 上部分视觉效果降级**：Mica 背景、控件圆角需要 Windows 11，
-  宿主会按能力位自动回落（Acrylic 或纯色）。
+- **`pack()` 只实现语义子集**。WinUI 没有 tkinter 的几何管理器，`pack` 的 `side` 不参与
+  布局计算，只把 `padx/pady` 翻译成 margin、`fill` 翻译成对齐。新代码建议直接用
+  `Column` / `Row` / `Grid`。
+- **`place()` 不实现**。WinUI 没有绝对定位，调用会抛 `NotImplementedError`。
+- **Windows 10 上部分视觉效果降级**。Mica 背景、控件圆角需要 Windows 11，宿主按能力位
+  自动回落（Acrylic 或纯色）。
 - **单窗口**。一个宿主进程对应一个窗口，多窗口（`Toplevel`）尚未支持。
-- **窗口没有尺寸上限**。`AppWindow` 不提供 `maxWidth` / `maxHeight`，
-  只能靠 Win32 子类化拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
+- **窗口没有尺寸上限**。`AppWindow` 不提供 `maxWidth` / `maxHeight`，只能靠 Win32 子类化
+  拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
 - **关闭事件不可取消**。`closing` 只是通知，拦不住关窗；需要「确认退出」请在界面里做。
-- **启动至少 0.5 秒**。加载圈有保底显示时间，否则在快机器上只闪一两帧，看起来像界面抖了一下。
-- **回调在主线程执行**。回调里阻塞会卡住整个 UI，和 tkinter 行为一致。
-- **读回是同步阻塞的**。`query()` 默认等 2 秒，在主线程上阻塞；回调里连续读几百次
-  会明显卡顿。等待期间的事件不丢，但定时器会顺延。读几何值时宿主会强制
-  `UpdateLayout()`，控件特别多时单次读取可能较慢。
-- **窗口状态有事件顺序问题**。`sizeChanged` 比 presenter 状态更新早，所以在
-  `on_resize()` 回调里读 `win.state` 可能还是旧值；要精确判断请在
-  `on_state_changed()` 里读，或在 `maximize()` 之后单独 `query()`。
-- **拖放只回报「发生了」**。`drop` 等事件给出 `{accepted}`，不解析
-  `DataView` 里的文件/文本内容，也没有 `DragStarting`。
-- **富文本目前是纯文本**。`RichTextBlock` / `RichEditBox` 只读写一段纯文字，
-  没有 `Block` / `Run` 的样式、超链接、图片内联接口。
-- **`RelativePanel` 只有容器能力**。WinUI 的 `AlignLeftWithPanel` / `AlignRightWith`
-  等附加属性未映射到协议，子节点目前在面板里按默认位置叠放；需要精确布局请用 `Grid`。
-- **动态条目不能塞子控件**。`TreeView` / `MenuBar` / `CommandBar` / `TabView` /
-  `ItemsView` / `BreadcrumbBar` 的条目由宿主按字符串生成，点击靠
-  `e.data["index"]` / `value` 区分，不能在条目里放自定义 UI。
-- **`CalendarView` 多选只读第一个日期**，`selectedDatesChanged` 回报单值。
-  `ItemsView` 用默认模板显示字符串，复杂 ItemTemplate 未开放。
-- **WinUI 3 没有内置 `DataGrid` 和 `InkCanvas`**，因此没有对应控件；
-  前者可以用 `GridView` / `ItemsView` 近似，后者需要自己接 `SwapChainPanel` + DirectX。
-- **WebView2 依赖系统运行时**。只覆盖「运行时没装」这一种失败：运行时存在但初始化
-  失败（安装损坏）时该区域仍可能空白。`navigate_to_string()` 的页面没有真实地址；
-  `execute_script()` 的结果通过 `scriptResult` 事件回推，但网页仍不能主动向 Python
-  发消息（未开放 `WebMessageReceived`）。
+- **启动至少 0.5 秒**。加载圈有保底显示时间，否则在快机器上只闪一两帧，看起来像界面抖动。
+- **回调在主线程执行**。回调里阻塞会卡住整个 UI，与 tkinter 行为一致。
+- **读回是同步阻塞的**。`query()` 默认等 2 秒，在主线程上阻塞；回调里连续读几百次会明显
+  卡顿。等待期间的事件不丢，但定时器会顺延。读几何值时宿主会强制 `UpdateLayout()`，控件
+  特别多时单次读取可能较慢。
+- **窗口状态有事件顺序问题**。`sizeChanged` 比 presenter 状态更新早，在 `on_resize()`
+  回调里读 `win.state` 可能还是旧值；要精确判断请在 `on_state_changed()` 里读，或在
+  `maximize()` 之后单独 `query()`。
+- **拖放只回报「发生了」**。`drop` 等事件给出 `{accepted}`，不解析 `DataView` 里的文件 /
+  文本内容，也没有 `DragStarting`。
+- **富文本目前是纯文本**。`RichTextBlock` / `RichEditBox` 只读写一段纯文字，没有 `Block` /
+  `Run` 的样式、超链接、图片内联接口。
+- **`RelativePanel` 只有容器能力**。WinUI 的 `AlignLeftWithPanel` / `AlignRightWith` 等附加
+  属性未映射到协议，子节点目前按默认位置叠放；需要精确布局请用 `Grid`。
+- **动态条目不能塞子控件**。`TreeView` / `MenuBar` / `CommandBar` / `TabView` / `ItemsView` /
+  `BreadcrumbBar` 的条目由宿主按字符串生成，点击靠 `e.data["index"]` / `value` 区分，不能
+  在条目里放自定义 UI。（`TabPage` / `PinnedTab` 是例外，见 [6.6](#66-标签页)。）
+- **`CalendarView` 多选只读第一个日期**，`selectedDatesChanged` 回报单值；`ItemsView` 用默认
+  模板显示字符串，复杂 ItemTemplate 未开放。
+- **没有 `DataGrid` 和 `InkCanvas`**。WinUI 3 不内置这两个控件；前者可用 `GridView` /
+  `ItemsView` 近似，后者需要自己接 `SwapChainPanel` + DirectX。
+- **WebView2 依赖系统运行时**。只覆盖「运行时未安装」这一种失败；运行时存在但初始化失败
+  （安装损坏）时该区域仍可能空白。`navigate_to_string()` 的页面没有真实地址。
+  `WebResourceRequested` 拦截、`addHostObjectToScript`、证书 / HTTP 认证、完整多窗口尚未
+  实现；`permissionRequested` 未接；WinUI 3 不暴露程序化 `zoomFactor`。
 
 ---
 
 ## 9. 开发与验证
 
 ```powershell
-# 宿主（Debug / Release）
+# 宿主（Release）
 dotnet build host/PyWinUI.Host/PyWinUI.Host.csproj -c Release
 
-# Python 单测 + 两个端到端 smoke
+# Python 单测 + C# 协议层单测
 $env:PYTHONPATH = "python"
 python -m unittest discover -s tests -p "test_*.py"
+dotnet test host/PyWinUI.Host.Tests/PyWinUI.Host.Tests.csproj -c Release
+
+# 端到端 smoke（需要真实桌面会话）
 python tests/smoke_render.py
 python tests/smoke_events.py
+python tests/smoke_tabs.py
+python tests/drag_pinned.py      # 真实鼠标拖拽：固定标签拖不动、普通标签能重排
+python tests/smoke_badline.py    # 坏 JSON / 错误字段之后会话仍可用
+python tests/smoke_webview2.py   # 真机：消息 / 新窗口回执 / 下载生命周期
 ```
 
+CI（`.github/workflows/ci.yml`）跑 Python 单测、宿主 `dotnet build -c Release` 与 C# 协议层
+`dotnet test`。协议层测试项目是纯 net8.0，直接链接宿主的 `Protocol/*.cs`，不需要桌面会话，
+也不需要拉起整套 WinUI 运行时。
+
 > **不要删 `App.xaml`。** 它看起来只是放资源，实际上 XAML 编译器靠它生成
-> `IXamlMetadataProvider` 和 `XamlTypeInfo`。少了它，`XamlControlsResources`
-> 在构造时会抛「Cannot find a resource with the given key」，然后进程以
-> `0xC000027B`（stowed exception）直接退出。纯代码工程走不通这条路。
+> `IXamlMetadataProvider` 与 `XamlTypeInfo`。少了它，`XamlControlsResources` 在构造时会抛
+> 「Cannot find a resource with the given key」，进程随后以 `0xC000027B`（stowed exception）
+> 直接退出。纯代码工程走不通这条路。
 
 改协议时请同步 `docs/protocol.md`、C# 的 `Protocol/`、`PropertyApplier.cs` /
-`ExtendedProperties.cs`、`EventBridge.cs` / `ExtendedEvents.cs`、`Session.cs`，
-Python 的 `protocol.py`、`app.py`、`widgets.py` / `extended.py`，再跑一遍单测和 smoke。
-`tests/test_extended.py` 覆盖新增控件、query 消息形状与事件快捷绑定，不需要宿主进程。
+`ExtendedProperties.cs`、`EventBridge.cs` / `ExtendedEvents.cs`、`Session.cs`、
+`MicroRuntime.cs`（微代码）、`HostLog.cs`（日志分级）、`ExtendedControls.cs` /
+`ExtendedInvoke.cs` / `FormRenderer.cs`（扩展控件的工厂 / 命令 / 挂载），以及 Python 的
+`protocol.py`、`app.py`（含 16 ms patch 合并窗口）、`widgets.py` / `extended.py`，再跑一遍
+单测与 smoke。`tests/test_extended.py` 覆盖新增控件、query 消息形状与事件快捷绑定，不需要
+宿主进程。
 
 扩展能力的实现刻意按「工厂 / 属性 / 事件 / 命令 / 读回」拆成五个独立文件
 （`ExtendedControls.cs`、`ExtendedProperties.cs`、`ExtendedEvents.cs`、
-`ExtendedInvoke.cs`、`QueryExecutor.cs`），再通过各主 switch 的 `default` 或
-属性循环前置调用接进来；基础控件的既有分支基本没动，回归面更小。
+`ExtendedInvoke.cs`、`QueryExecutor.cs`），再通过各主 switch 的 `default` 或属性循环前置
+调用接进来；基础控件的既有分支基本没动，回归面更小。
 
 ---
 
-## License
+## 10. 许可
 
 **GPL-3.0-only**（GNU General Public License v3.0）。完整条款见仓库根目录 [LICENSE](LICENSE)。
 
-选择强著佐权（copyleft）而非 MIT：任何人都可以自由使用、修改和分发本项目，
-但只要分发基于本项目的衍生作品（包括打包进商业软件），就必须在同样协议下公开
-对应的完整源代码，且不得附加额外限制。这保留了原作者对其代码传播方式的控制权，
-也避免代码被闭源产品直接拿去用。
+选择强著佐权（copyleft）而非 MIT：任何人都可以自由使用、修改和分发本项目，但只要分发
+基于本项目的衍生作品（包括打包进商业软件），就必须在相同协议下公开对应的完整源代码，
+且不得附加额外限制。这保留了原作者对其代码传播方式的控制权，也避免代码被闭源产品直接使用。
 
-> 如果你需要把本库链接进闭源程序，请单独联系作者获取商业授权。
+> 如需将本库链接进闭源程序，请通过 GitHub Issues 联系获取商业授权。

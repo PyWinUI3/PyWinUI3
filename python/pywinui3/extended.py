@@ -303,13 +303,110 @@ class Pivot(_ItemsWidget):
 
 
 class TabView(_ItemsWidget):
-    """可关闭的标签页容器；关闭请求回 ``tabCloseRequested`` 事件。"""
+    """标签页容器。
+
+    两类子元素都是真正的标签页（宿主里都是 ``TabViewItem``），区别只在行为：
+
+    - :class:`PinnedTab` —— 固定选项卡，**不可关闭、不可拖动重排**，永远排在
+      标签条最前面；同样能放子控件、同样支持 ``icon``。
+    - :class:`TabPage` —— 普通标签页，**可拖动重排、可关闭**，也能放子控件。
+
+    ``items=[...]`` 仍是快捷写法，生成一组可关闭的普通标签页（不能放子控件）。
+    用 ``PinnedTab`` / ``TabPage`` 子节点时不要再传 ``items``，两者会同时出现在
+    标签条上。
+
+    关闭按钮点击后宿主回 ``tabCloseRequested``，容器默认销毁对应 ``TabPage``
+    （走 :meth:`Widget.destroy`）；用户仍可 ``bind("tabCloseRequested", fn)``
+    收到通知，两种逻辑互不抢占。
+    """
 
     _type = "TabView"
 
     def __init__(self, master: Any, items: Iterable[Any] | None = None, **kwargs: Any):
         kwargs.setdefault("height", 200)
+        kwargs.setdefault("can_reorder_tabs", True)
         super().__init__(master, items, **kwargs)
+
+    def _on_event(self, event: Any) -> None:
+        # 内部钩子先于用户回调执行，且不会被 bind() 覆盖（见 App._dispatch_event）。
+        # 用户点关闭时把对应节点从 Python 侧控件树里摘掉，否则宿主移除了标签、
+        # Python 还留着一个孤儿节点，后续 set/query 都会报 unknown-node。
+        if event.name != "tabCloseRequested":
+            return
+        node_id = event.data.get("nodeId")
+        if not isinstance(node_id, str):
+            value = event.data.get("value")
+            for child in list(self._children):
+                if getattr(child, "text", None) == value:
+                    node_id = child._id
+                    break
+        if isinstance(node_id, str):
+            target = self._app._nodes.get(node_id)
+            if target is not None:
+                target.destroy()
+
+    def add_page(self, text: str, **kwargs: Any) -> "TabPage":
+        """追加一个可移动、可关闭的标签页，返回可放子控件的容器。"""
+        return TabPage(self, text, **kwargs)
+
+    def add_pinned(self, text: str, **kwargs: Any) -> "PinnedTab":
+        """追加一个不可移动、不可关闭的固定选项卡（同样是标签页）。"""
+        return PinnedTab(self, text, **kwargs)
+
+
+class PinnedTab(Widget):
+    """固定选项卡：真正的标签页，只是不能关闭、不能拖动重排。
+
+    宿主里它和 :class:`TabPage` 一样是 ``TabViewItem``，区别只有两点：
+    ``IsClosable=false``，以及拖动会被取消；用户把普通标签拖到它前面时，
+    拖动结束后固定标签会整块归位到最前面。
+
+    因此它同样能放子控件、同样支持 ``icon``（Segoe 字形或本地图片路径），
+    选中时同样回 ``tabSelected`` 事件，``data`` 带 ``value`` / ``nodeId``。
+
+    ``min_width`` / ``max_width`` 直接约束标签宽度；标题超宽时自动用 ``…``
+    省略，读回 ``text`` 仍是完整原文。
+    """
+
+    _type = "PinnedTab"
+
+    def __init__(self, master: Any, text: str = "", **kwargs: Any):
+        kwargs.setdefault("text", text)
+        super().__init__(master, **kwargs)
+
+    def select(self) -> None:
+        """把这个固定选项卡切到前台（和点它一下等价）。"""
+        self._app._send_invoke(self._id, "select_tab")
+
+
+class TabPage(Widget):
+    """普通标签页：可拖动重排、可关闭，并且能放子控件。
+
+    ``closable=False`` 可关掉关闭按钮；``icon`` 支持 Segoe 字形（如
+    ``"\\uE80F"``）或本地图片路径（``.png`` / ``.jpg`` / ``.ico`` / ``.bmp`` /
+    ``.svg``）。SVG 由宿主用 ``SvgImageSource`` 栅格化，高 DPI 下也清晰。
+
+    ``min_width`` / ``max_width`` 直接约束标签宽度；标题超宽时自动用 ``…``
+    省略，读回 ``text`` 仍是完整原文。
+
+    子控件直接写在下面即可，宿主会在 ``TabViewItem.Content`` 里预置一层
+    ``StackPanel``，挂载规则和 :class:`Column` 完全一致。
+    """
+
+    _type = "TabPage"
+
+    def __init__(self, master: Any, text: str = "", **kwargs: Any):
+        kwargs.setdefault("text", text)
+        kwargs.setdefault("closable", True)
+        super().__init__(master, **kwargs)
+
+    def close(self) -> None:
+        """程序化关闭：等价于用户点关闭按钮。"""
+        self.destroy()
+
+    def select(self) -> None:
+        """把这个标签页切到前台。"""
+        self._app._send_invoke(self._id, "select_tab")
 
 
 class TreeView(_ItemsWidget):
@@ -499,6 +596,8 @@ __all__ = [
     "FlipView",
     "Pivot",
     "TabView",
+    "PinnedTab",
+    "TabPage",
     "TreeView",
     "NavigationView",
     "MenuBar",

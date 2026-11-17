@@ -101,6 +101,57 @@ internal static class ExtendedProperties
         JsonNode? v,
         Action<string> warn)
     {
+        // TabPage（TabViewItem）与固定选项卡是新增元素，主 switch 不认识它们。
+        // 先在这里消费专有属性，避免掉回去报一条误导性的「未知属性」。
+        // WebView2 的设置要等 CoreWebView2 初始化，先交给支持层缓存；
+        // 降级占位是 Border，这里认下名字并静默忽略，别刷「未知属性」。
+        if (WebView2Support.IsSettingKey(key))
+        {
+            if (e is WebView2 settingWeb)
+            {
+                WebView2Support.SetSetting(settingWeb, key, v, warn);
+            }
+
+            return true;
+        }
+
+        if (e is TabViewItem tabPage)
+        {
+            switch (key)
+            {
+                case "text":
+                    // 用 TextBlock 承载标题而不是字符串：只有 TextBlock 能设
+                    // TextTrimming=CharacterEllipsis，长标题才会变成 "标题…"。
+                    // 宽度约束（minWidth / maxWidth）施加在 TabViewItem 上，
+                    // 文本会在可用宽度内自动省略。
+                    ExtendedControls.SetTabHeader(tabPage, ValueParsers.AsString(v) ?? "");
+                    return true;                case "closable":
+                    tabPage.IsClosable = ValueParsers.AsBool(v) ?? true;
+                    return true;
+            }
+        }
+
+        if (e is TabView tabStrip)
+        {
+            switch (key)
+            {
+                case "canReorderTabs":
+                    tabStrip.CanReorderTabs = ValueParsers.AsBool(v) ?? true;
+                    return true;
+                // WinUI 默认是 Equal：所有标签平分整条宽度，两三个标签时会被拉得
+                // 很宽、关闭按钮漂到很远。演示和大多数工具界面要的是按内容收缩。
+                case "tabWidthMode":
+                    tabStrip.TabWidthMode = (ValueParsers.AsString(v) ?? "").ToLowerInvariant() switch
+                    {
+                        "equal" => TabViewWidthMode.Equal,
+                        "compact" => TabViewWidthMode.Compact,
+                        "sizetocontent" or "size_to_content" => TabViewWidthMode.SizeToContent,
+                        _ => tabStrip.TabWidthMode,
+                    };
+                    return true;
+            }
+        }
+
         switch (key)
         {
             // ================= 通用 FrameworkElement =================
@@ -576,7 +627,18 @@ internal static class ExtendedProperties
             case TabView tabs:
                 tabs.TabItems.Clear();
                 foreach (var label in labels)
-                    tabs.TabItems.Add(new TabViewItem { Header = label, Tag = label });
+                {
+                    // items 快捷写法生成的是「可移动、可关闭」的普通标签页；
+                    // 需要放子控件时改用 TabPage 子节点。
+                    var tab = new TabViewItem
+                    {
+                        Tag = label,
+                        IsClosable = true,
+                    };
+                    ExtendedControls.SetTabHeader(tab, label);
+                    tabs.TabItems.Add(tab);
+                }
+
                 return true;
 
             case NavigationView nav:

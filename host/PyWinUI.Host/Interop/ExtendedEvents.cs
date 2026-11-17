@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
+using PyWinUI.Host.Rendering;
 using Windows.System;
 using Windows.UI.Core;
 
@@ -18,10 +19,16 @@ namespace PyWinUI.Host.Interop;
 internal static class ExtendedEvents
 {
     /// <summary>通用事件 + 扩展控件专属事件。</summary>
+    /// <param name="nodeId">绑定事件的节点 id（是标签自己，不是所属 TabView）。</param>
+    /// <param name="resolveId">把子元素反查成节点 id；标签关闭事件需要它来定位具体是哪一页。</param>
+    /// <param name="resolveOwner">按节点 id 取父元素；标签选中要挂到所属 TabView 上。</param>
     public static bool TryBind(
         FrameworkElement element,
+        string nodeId,
         string eventName,
-        Action<string, JsonObject?> raise)
+        Action<string, JsonObject?> raise,
+        Func<DependencyObject, string?>? resolveId = null,
+        Func<string, FrameworkElement?>? resolveOwner = null)
     {
         var name = eventName;
         void Post(JsonObject? data = null) => raise(name, data ?? new JsonObject());
@@ -261,13 +268,48 @@ internal static class ExtendedEvents
 
                 return false;
 
+            case "tabSelected":
+                // 两类标签都是 TabViewItem，选中事件只能挂到所属 TabView 上。
+                // 每个绑定的标签各挂一个监听，只有「选中项正好是自己」时才回事件，
+                // 所以同一次切换只会产生一条 tabSelected。
+                if (element is TabViewItem tabItem
+                    && resolveOwner?.Invoke(nodeId) is TabView owner)
+                {
+                    owner.SelectionChanged += (_, _) =>
+                    {
+                        if (ReferenceEquals(owner.SelectedItem, tabItem))
+                        {
+                            Post(new JsonObject
+                            {
+                                ["value"] = ExtendedControls.TabHeaderText(tabItem),
+                            });
+                        }
+                    };
+                    return true;
+                }
+
+                return false;
+
             case "tabCloseRequested":
                 if (element is TabView tabs)
                 {
-                    tabs.TabCloseRequested += (_, e) => Post(new JsonObject
+                    tabs.TabCloseRequested += (_, e) =>
                     {
-                        ["value"] = (e.Tab as TabViewItem)?.Header?.ToString() ?? "",
-                    });
+                        var tab = e.Tab as TabViewItem;
+                        var data = new JsonObject
+                        {
+                            ["value"] = tab is null ? "" : ExtendedControls.TabHeaderText(tab),
+                        };
+
+                        // 带上被关标签自己的节点 id：只靠标题文字的话，
+                        // 两个同名标签（「未命名」很常见）会关错页。
+                        if (tab is not null && resolveId?.Invoke(tab) is { } tabId)
+                        {
+                            data["nodeId"] = tabId;
+                        }
+
+                        Post(data);
+                    };
                     return true;
                 }
 
