@@ -11,7 +11,7 @@ JSON Lines。`mainloop()` 的语义与 tkinter 一致；宿主崩溃不会带走
 | **Python** | 3.10+，仅标准库，零第三方依赖 |
 | **协议** | [docs/protocol.md](docs/protocol.md) 是唯一权威定义 |
 | **能力** | 58 种控件、query/result 同步读回、micro 微代码、键盘/焦点/拖放/窗口状态事件 |
-| **版本 / 许可** | 0.1.0 · GPL-3.0-only |
+| **版本 / 许可** | 0.2.0 · GPL-3.0-only |
 
 ```python
 import pywinui3 as ui

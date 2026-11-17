@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import collections
 import sys
 import time
 import unittest
@@ -62,13 +63,19 @@ class TestPersistentEof(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 0.5, "第二次 recv 又退化成等待超时了")
 
 
-class ByeHost:
-    """一条 bye 之后就没有消息的假宿主。"""
+class ByeHost(HostProcess):
+    """一条 bye 之后就没有消息的假宿主。
 
-    exit_code = 0
-    stderr_text = ""
+    刻意继承真实的 ``HostProcess`` 而不自带 ``exit_code`` / ``stderr_text``：
+    早期这个桩自己定义了这两个属性，恰好掩盖了 ``App.query`` 误读
+    ``host.exit_code``（真实类只有 ``_exit_code``）的 bug。桩必须贴近
+    真实接口，否则测试全绿也不代表线上路径可用。
+    """
 
     def __init__(self) -> None:
+        # 绕过 HostProcess.__init__（它要找宿主 exe）；只继承状态属性访问器。
+        self._proc = None
+        self._stderr_tail: collections.deque[str] = collections.deque()
         self.sent: list[dict] = []
 
     def send(self, message: dict) -> None:
@@ -81,12 +88,18 @@ class ByeHost:
 class TestQueryOnBye(unittest.TestCase):
     def test_query_raises_host_exited(self):
         app = ui.App()
-        app._host = ByeHost()  # type: ignore[assignment]
+        host = ByeHost()
+        app._host = host  # type: ignore[assignment]
 
         started = time.monotonic()
-        with self.assertRaises(HostExited):
+        with self.assertRaises(HostExited) as ctx:
             app.query("n1", "text", timeout=5.0)
         self.assertLess(time.monotonic() - started, 0.5, "收到 bye 还在等超时")
+
+        # 异常必须真的从宿主状态里取到字段——这正是 AttributeError 那次
+        # 回归漏掉的部分：只断言异常类型，读错属性同样会「抛出」，只是抛错类型。
+        self.assertIsNone(ctx.exception.exit_code)
+        self.assertEqual(ctx.exception.stderr, "")
         app._host = None
 
 

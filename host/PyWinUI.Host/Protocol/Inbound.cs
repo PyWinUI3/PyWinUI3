@@ -130,7 +130,9 @@ public static class Inbound
                 "dialog" => ParseDialog(root),
                 "close" => ParseClose(root),
                 // 新增 op 不算不兼容变更，旧端遇到新消息应当忽略而不是终止会话。
-                // 字段缺失/类型错误仍然走 bad-protocol 并终止（见 Wire.IsFatal）。
+                // 字段缺失/类型错误走 bad-protocol：回一条 error 后跳过这一行，
+                // 同样不终止——消息逐行分帧，坏一行不影响下一行。
+                // 唯一致命的是 version-mismatch（见 Wire.IsFatal）。
                 var op => new UnknownMessage { Op = op },
             };
         }

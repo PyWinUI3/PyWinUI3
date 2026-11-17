@@ -224,6 +224,17 @@ class HostProcess:
         return self._proc.poll() if self._proc else None
 
     @property
+    def exit_code(self) -> int | None:
+        """宿主退出码；仍在运行时为 ``None``。
+
+        公开的读回口：上层构造 ``HostExited`` 时需要它。早期只有私有的
+        ``_exit_code``，``App.query`` 误读了不存在的 ``host.exit_code``，
+        在「查询过程中宿主退出」这条路径上抛 ``AttributeError`` 而不是
+        ``HostExited``——测试桩恰好自带同名属性，掩盖了这个缺口。
+        """
+        return self._exit_code
+
+    @property
     def stderr_text(self) -> str:
         return "\n".join(self._stderr_tail)
 

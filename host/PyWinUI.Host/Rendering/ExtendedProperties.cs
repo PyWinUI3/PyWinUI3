@@ -125,7 +125,9 @@ internal static class ExtendedProperties
                     // 宽度约束（minWidth / maxWidth）施加在 TabViewItem 上，
                     // 文本会在可用宽度内自动省略。
                     ExtendedControls.SetTabHeader(tabPage, ValueParsers.AsString(v) ?? "");
-                    return true;                case "closable":
+                    return true;
+
+                case "closable":
                     tabPage.IsClosable = ValueParsers.AsBool(v) ?? true;
                     return true;
             }

@@ -61,6 +61,9 @@ internal sealed class QueryExecutor
                     ["width"] = _window.AppWindow.Size.Width,
                     ["height"] = _window.AppWindow.Size.Height,
                 };
+            // dpiScale 是窗口级属性：XamlRoot 属于整个窗口，所有控件共享同一缩放。
+            // 只在这里读一次；控件级 switch 曾有一份重复分支，但因本 switch 无条件
+            // 先返回而永远不可达（死代码），已移除。
             case "dpiScale":
                 return _window.Content?.XamlRoot?.RasterizationScale ?? 1.0;
             case "windowTitle":
@@ -165,8 +168,7 @@ internal sealed class QueryExecutor
                     && focused.FocusState != FocusState.Unfocused;
             case "width": return element.Width;
             case "height": return element.Height;
-            case "dpiScale":
-                return element.XamlRoot?.RasterizationScale ?? 1.0;
+            // dpiScale 走窗口级分支，见本方法顶部；这里不重复。
 
             // ---- 文本 / 输入 ----
             case "text": return ReadText(element);

@@ -94,7 +94,7 @@ Python                          Host
 #### `hello` — 握手
 
 ```json
-{ "op": "hello", "protocol": 1, "client": "pywinui3/0.1.0", "pid": 12345 }
+{ "op": "hello", "protocol": 1, "client": "pywinui3/0.2.0", "pid": 12345 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -323,7 +323,7 @@ Python 侧 `App.query()` 是阻塞式的：等到配对结果才返回，等待�
 {
   "t": "ready",
   "protocol": 1,
-  "host": "PyWinUI.Host/0.1.0",
+  "host": "PyWinUI.Host/0.2.0",
   "os": { "version": "10.0.19044", "build": 19044 },
   "capabilities": {
     "mica": false,
@@ -1040,8 +1040,8 @@ win.mainloop()
 对应线上流量：
 
 ```
-→ {"op":"hello","protocol":1,"client":"pywinui3/0.1.0","pid":8123}
-← {"t":"ready","protocol":1,"host":"PyWinUI.Host/0.1.0","os":{"version":"10.0.19044","build":19044},"capabilities":{"mica":false,"acrylic":true,"roundedCorners":false,"backdrop":"acrylic"}}
+→ {"op":"hello","protocol":1,"client":"pywinui3/0.2.0","pid":8123}
+← {"t":"ready","protocol":1,"host":"PyWinUI.Host/0.2.0","os":{"version":"10.0.19044","build":19044},"capabilities":{"mica":false,"acrylic":true,"roundedCorners":false,"backdrop":"acrylic"}}
 → {"op":"render","rev":1,"window":{"title":"Demo","width":640,"height":480,"backdrop":"auto"},"root":"n0","nodes":[{"id":"n0","type":"Column","props":{"padding":24,"spacing":12},"children":["n1","n2"]},{"id":"n1","type":"Label","props":{"text":"你好","fontSize":28}},{"id":"n2","type":"Button","props":{"text":"点我"},"events":{"click":"h1"}}]}
 ← {"t":"ack","rev":1}
 ← {"t":"event","id":"n2","event":"click","rev":1,"data":{}}
