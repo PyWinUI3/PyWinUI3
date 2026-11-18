@@ -265,7 +265,7 @@ public static class Inbound
     {
         var rawMode = RequireString(e, "mode").ToLowerInvariant();
         // 模式白名单 + 归一化：拼错就回非致命 bad-protocol，
-        // 而不是打开一个行为未知的窗。归一化后 FileDialogSupport 直接用规范值判断。
+        // 而不是打开一个行为未知的窗。归一化后 SystemFilePicker 直接用规范值判断。
         var mode = rawMode switch
         {
             "open" => "open",

@@ -50,11 +50,13 @@ class App:
         self,
         host: str | Path | None = None,
         *,
+        popup: bool = False,
         timeout: float = DEFAULT_TIMEOUT,
         on_error: Callable[[UiError], None] | None = None,
         on_warning: Callable[[str, str | None], None] | None = None,
     ):
         self._host_path = host
+        self._popup = popup
         self._timeout = timeout
         self._on_error = on_error
         #: 非致命告警（属性名拼错、未知控件/事件）的回调，签名 ``(message, node_id)``。
@@ -131,7 +133,10 @@ class App:
             self.after_cancel(self._flush_token)
             self._flush_token = None
 
-        host = HostProcess(self._host_path)
+        host = HostProcess(
+            self._host_path,
+            extra_args=["--silent"] if self._popup else None,
+        )
         host.start()
         self._host = host
         try:
@@ -583,17 +588,20 @@ class App:
     ) -> list[str]:
         """弹出文件选择对话框，同步返回选中的路径列表。
 
-        宿主用 WinUI 基础控件自绘这个对话框（不用原生 FilePicker），
-        支持四种 ``mode``：
+        宿主用 **系统自带的文件选择器**（FileOpenPicker / FileSavePicker /
+        FolderPicker），支持四种 ``mode``：
 
         - ``"open"``：选单个已存在文件
         - ``"openMultiple"``：多选，返回多个路径
-        - ``"save"``：浏览目录 + 输入文件名，文件可以不存在
+        - ``"save"``：输入文件名保存，文件可以不存在
         - ``"folder"``：选一个目录
 
         ``filter`` 是分号分隔的扩展名，如 ``"*.txt;*.py"``（也接受
-        ``"图片|*.png;*.jpg"`` 这种带标签的写法）；``initial_dir`` 指定
-        打开时所在目录，``default_name`` 预填文件名。
+        ``"图片|*.png;*.jpg"`` 这种带标签的写法）；``default_name`` 预填文件名。
+
+        注意系统选择器的限制：``title`` 和 ``initial_dir`` 不会生效（系统窗口
+        不支持自定义标题，初始位置由系统记忆），这是换取原生外观和最近位置
+        记忆的代价。
 
         返回路径列表；用户取消返回空列表。默认等 300 秒——模态对话框
         由人操作，不像 query 那样几毫秒就能回。传 ``timeout=None`` 可无限等。

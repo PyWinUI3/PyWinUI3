@@ -34,6 +34,21 @@ internal sealed class Session
     private bool _handshaken;
     private bool _closed;
 
+    /// <summary>
+    /// 首帧 render 已应用到窗口后触发一次。
+    /// 静默启动（--silent）靠它决定「什么时候把窗口亮出来」——
+    /// 在这之前窗口是隐藏的，避免用户看到加载圈或半成品界面。
+    /// </summary>
+    public event Action? FirstRenderApplied;
+
+    /// <summary>
+    /// 首帧之前就失败（Python 侧退出、管道断开等）。参数是错误描述，可能为 null。
+    /// 订阅方负责把失败原因显示出来——静默模式下窗口还没亮，不提示就等于无响应。
+    /// </summary>
+    public event Action<string?>? StartupFailed;
+
+    private bool _firstRenderNotified;
+
     public Session(Window window, DispatcherQueue dispatcher)
     {
         _window = window;
@@ -135,6 +150,13 @@ internal sealed class Session
                 // 渲染失败时窗口保持加载态的小尺寸——那里能最大化毫无意义。
                 _renderer.Render(render);
                 Send(Outbound.Ack(render.Rev));
+
+                if (!_firstRenderNotified)
+                {
+                    _firstRenderNotified = true;
+                    FirstRenderApplied?.Invoke();
+                }
+
                 break;
 
             case PatchMessage patch:
@@ -594,8 +616,10 @@ internal sealed class Session
     }
 
     /// <summary>
-    /// 自绘文件对话框：和 ShowDialog 共用同一把 _dialogOpen 锁
-    /// （WinUI 同时只允许一个 ContentDialog），结束后回 fileDialogResult。
+    /// 系统自带文件选择器。
+    ///
+    /// 系统 picker 是独立窗口，不占用 ContentDialog 的 _dialogOpen 名额，
+    /// 但仍串行化——同时弹两个选择器在体验上也是事故。
     /// </summary>
     private async void ShowFileDialog(FileDialogMessage message)
     {
@@ -605,20 +629,13 @@ internal sealed class Session
             return;
         }
 
-        var xamlRoot = await WaitForXamlRootAsync();
-        if (xamlRoot is null)
-        {
-            Send(Outbound.FileDialogResult(message.Id, false, null, "窗口还没有内容，无法显示对话框"));
-            return;
-        }
-
         _dialogOpen = true;
         try
         {
-            var outcome = await FileDialogSupport.ShowAsync(
-                xamlRoot,
+            var outcome = await SystemFilePicker.ShowAsync(
+                _window,
                 message.Mode,
-                message.Title ?? "",
+                message.Title,
                 message.InitialDir,
                 message.Filter,
                 message.DefaultName);
@@ -740,6 +757,14 @@ internal sealed class Session
         HostLog.Write(error is null
             ? "stdin closed (python side exited)"
             : $"stdin closed with error: {error}");
+
+        // 首帧还没出来就断开：界面上什么都没有，直接关窗等于「静默失败」。
+        // 交给上层把失败原因显示出来。
+        if (!_firstRenderNotified && StartupFailed is not null)
+        {
+            _dispatcher.TryEnqueue(() => StartupFailed.Invoke(error));
+            return;
+        }
 
         // Python 那边没了，界面留着也没意义
         _dispatcher.TryEnqueue(() => Shutdown(0));
