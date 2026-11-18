@@ -91,7 +91,7 @@ from .widgets import (
 )
 from .window import Window
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 def dialog(title: str, message: str, kind: str = "info") -> None:
