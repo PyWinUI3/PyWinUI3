@@ -61,7 +61,9 @@ internal static class ExtendedControls
                 return new RatingControl();
 
             case "ColorPicker":
-                return new ColorPicker { IsMoreButtonVisible = false };
+                // 自绘调色框：不用 WinUI 原生 ColorPicker（窄宽度会挤成一条线，
+                // 外观也随主题/DPI 漂移）。对外 color 属性 / colorChanged 事件不变。
+                return new CustomColorPicker();
 
             case "DropDownButton":
                 return new DropDownButton { Content = "选择" };

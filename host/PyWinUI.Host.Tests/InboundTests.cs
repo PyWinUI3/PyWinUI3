@@ -150,6 +150,69 @@ public sealed class InboundTests
         Assert.Equal(0, close.Code);
     }
 
+    // ---------------------------------------------------------------
+    // 文件对话框（自绘，不用原生 Picker）
+    // ---------------------------------------------------------------
+
+    [Fact]
+    public void Parse_FileDialog_AllFields()
+    {
+        var msg = Assert.IsType<FileDialogMessage>(Inbound.Parse("""
+            {
+              "op": "fileDialog", "id": "f1", "mode": "save",
+              "title": "保存文件", "initialDir": "D:\\data",
+              "filter": "*.txt;*.py", "defaultName": "out.txt"
+            }
+            """));
+
+        Assert.Equal("f1", msg.Id);
+        Assert.Equal("save", msg.Mode);
+        Assert.Equal("保存文件", msg.Title);
+        Assert.Equal(@"D:\data", msg.InitialDir);
+        Assert.Equal("*.txt;*.py", msg.Filter);
+        Assert.Equal("out.txt", msg.DefaultName);
+    }
+
+    [Theory]
+    [InlineData("open", "open")]
+    [InlineData("openMultiple", "openMultiple")]
+    [InlineData("OPENMULTIPLE", "openMultiple")]
+    [InlineData("folder", "folder")]
+    public void Parse_FileDialog_NormalizesMode(string raw, string expected)
+    {
+        var msg = Assert.IsType<FileDialogMessage>(Inbound.Parse(
+            $"{{\"op\":\"fileDialog\",\"id\":\"f\",\"mode\":\"{raw}\"}}"));
+        Assert.Equal(expected, msg.Mode);
+    }
+
+    [Fact]
+    public void Parse_FileDialog_OptionalFieldsAreNull()
+    {
+        var msg = Assert.IsType<FileDialogMessage>(Inbound.Parse(
+            """{"op":"fileDialog","id":"f","mode":"open"}"""));
+        Assert.Null(msg.Title);
+        Assert.Null(msg.InitialDir);
+        Assert.Null(msg.Filter);
+        Assert.Null(msg.DefaultName);
+    }
+
+    [Fact]
+    public void Parse_FileDialog_InvalidModeThrowsBadProtocol()
+    {
+        var ex = Assert.Throws<ProtocolException>(() => Inbound.Parse(
+            """{"op":"fileDialog","id":"f","mode":"bogus"}"""));
+        Assert.Equal("bad-protocol", ex.Code);
+        Assert.False(ex.IsFatal);
+    }
+
+    [Fact]
+    public void Parse_FileDialog_MissingIdThrowsBadProtocol()
+    {
+        var ex = Assert.Throws<ProtocolException>(() => Inbound.Parse(
+            """{"op":"fileDialog","mode":"open"}"""));
+        Assert.Equal("bad-protocol", ex.Code);
+    }
+
     [Fact]
     public void Parse_UnknownOp_BecomesNonFatalUnknownMessage()
     {

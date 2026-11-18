@@ -105,6 +105,37 @@ def dialog(title: str, message: str, kind: str = "info") -> None:
     """
     App.default().dialog(title, message, kind)
 
+
+def file_dialog(
+    mode: str,
+    *,
+    title: str | None = None,
+    initial_dir: str | None = None,
+    filter: str | None = None,
+    default_name: str | None = None,
+    timeout: float | None = 300.0,
+) -> list[str]:
+    """弹出自绘文件对话框，同步返回选中的路径列表。
+
+    ``mode`` 取 ``"open"``（单个）、``"openMultiple"``（多选）、``"save"``
+    （保存路径）、``"folder"``（目录）。用户取消返回空列表。
+
+    ::
+
+        files = ui.file_dialog("openMultiple", title="选择图片", filter="*.png;*.jpg")
+        if files:
+            print("选中了", files)
+    """
+    return App.default().file_dialog(
+        mode,
+        title=title,
+        initial_dir=initial_dir,
+        filter=filter,
+        default_name=default_name,
+        timeout=timeout,
+    )
+
+
 __all__ = [
     # 应用与窗口
     "App",
@@ -182,6 +213,7 @@ __all__ = [
     # 其他
     "Event",
     "dialog",
+    "file_dialog",
     "PROTOCOL_VERSION",
     "__version__",
     # 异常

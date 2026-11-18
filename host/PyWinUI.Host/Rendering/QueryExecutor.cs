@@ -413,5 +413,7 @@ internal sealed class QueryExecutor
     };
 
     private static string? ReadColor(FrameworkElement element) =>
-        element is ColorPicker picker ? $"#{picker.Color.A:X2}{picker.Color.R:X2}{picker.Color.G:X2}{picker.Color.B:X2}" : null;
+        element is CustomColorPicker picker
+            ? $"#{picker.Color.A:X2}{picker.Color.R:X2}{picker.Color.G:X2}{picker.Color.B:X2}"
+            : null;
 }

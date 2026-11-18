@@ -72,6 +72,36 @@ public static class Outbound
         error,
     });
 
+    /// <summary>
+    /// 文件对话框的应答。ok=false 表示用户取消；paths 是选中的路径列表
+    /// （single/save/folder 恒为 1 项，openMultiple 可以是多项或空）。
+    /// </summary>
+    public static string FileDialogResult(string id, bool ok, IReadOnlyList<string>? paths, string? error = null) =>
+        Serialize(new
+        {
+            t = "fileDialogResult",
+            id,
+            ok,
+            paths = SanitizePaths(ok ? paths : null),
+            error = ok ? null : error,
+        });
+
+    private static JsonArray? SanitizePaths(IReadOnlyList<string>? paths)
+    {
+        if (paths is null)
+        {
+            return null;
+        }
+
+        var array = new JsonArray();
+        foreach (var path in paths)
+        {
+            array.Add(path);
+        }
+
+        return array;
+    }
+
     public static string Error(string code, string message, string? id = null) => Serialize(new
     {
         t = "error",

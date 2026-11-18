@@ -170,6 +170,11 @@ internal sealed class Session
                 ShowDialog(dialog);
                 break;
 
+            case FileDialogMessage fileDialog:
+                // 与 dialog 不同，文件选择必须把路径带回来，所以有 fileDialogResult 应答。
+                ShowFileDialog(fileDialog);
+                break;
+
             case CloseMessage close:
                 Shutdown(close.Code);
                 break;
@@ -586,6 +591,62 @@ internal sealed class Session
         {
             _dialogOpen = false;
         }
+    }
+
+    /// <summary>
+    /// 自绘文件对话框：和 ShowDialog 共用同一把 _dialogOpen 锁
+    /// （WinUI 同时只允许一个 ContentDialog），结束后回 fileDialogResult。
+    /// </summary>
+    private async void ShowFileDialog(FileDialogMessage message)
+    {
+        if (_dialogOpen)
+        {
+            Send(Outbound.FileDialogResult(message.Id, false, null, "已有对话框未关闭"));
+            return;
+        }
+
+        var xamlRoot = await WaitForXamlRootAsync();
+        if (xamlRoot is null)
+        {
+            Send(Outbound.FileDialogResult(message.Id, false, null, "窗口还没有内容，无法显示对话框"));
+            return;
+        }
+
+        _dialogOpen = true;
+        try
+        {
+            var outcome = await FileDialogSupport.ShowAsync(
+                xamlRoot,
+                message.Mode,
+                message.Title ?? "",
+                message.InitialDir,
+                message.Filter,
+                message.DefaultName);
+            Send(Outbound.FileDialogResult(message.Id, outcome.Ok, outcome.Paths,
+                outcome.Ok ? null : "用户取消"));
+        }
+        catch (Exception ex)
+        {
+            HostLog.Write("file dialog failed: " + ex.Message);
+            Send(Outbound.FileDialogResult(message.Id, false, null, $"文件对话框失败: {ex.Message}"));
+        }
+        finally
+        {
+            _dialogOpen = false;
+        }
+    }
+
+    /// <summary>等窗口 Content 的 XamlRoot 就绪，最多 500ms。</summary>
+    private async Task<XamlRoot?> WaitForXamlRootAsync()
+    {
+        var xamlRoot = _window.Content?.XamlRoot;
+        for (var attempt = 0; attempt < 10 && xamlRoot is null; attempt++)
+        {
+            await Task.Delay(50);
+            xamlRoot = _window.Content?.XamlRoot;
+        }
+
+        return xamlRoot;
     }
 
     // ==================================================================

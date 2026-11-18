@@ -66,6 +66,25 @@ public sealed record DialogMessage : InboundMessage
     public string? Kind { get; init; }
 }
 
+/// <summary>
+/// 打开文件选择对话框（自绘，不用原生 Picker）。带 id，宿主回一条
+/// <c>fileDialogResult</c> 配对——和 query/result 同一个同步读回模型：
+/// invoke 只能单向做事，而文件选择必须把用户选中的路径带回来。
+/// </summary>
+public sealed record FileDialogMessage : InboundMessage
+{
+    /// <summary>请求 id，回包原样带回。</summary>
+    public required string Id { get; init; }
+
+    /// <summary>open / openMultiple / save / folder。</summary>
+    public required string Mode { get; init; }
+
+    public string? Title { get; init; }
+    public string? InitialDir { get; init; }
+    public string? Filter { get; init; }
+    public string? DefaultName { get; init; }
+}
+
 public sealed record CloseMessage : InboundMessage
 {
     public int Code { get; init; }
@@ -128,6 +147,7 @@ public static class Inbound
                 "query" => ParseQuery(root),
                 "micro" => ParseMicro(root),
                 "dialog" => ParseDialog(root),
+                "fileDialog" => ParseFileDialog(root),
                 "close" => ParseClose(root),
                 // 新增 op 不算不兼容变更，旧端遇到新消息应当忽略而不是终止会话。
                 // 字段缺失/类型错误走 bad-protocol：回一条 error 后跳过这一行，
@@ -240,6 +260,31 @@ public static class Inbound
         Body = TryString(e, "body") ?? "",
         Kind = TryString(e, "kind"),
     };
+
+    private static FileDialogMessage ParseFileDialog(JsonElement e)
+    {
+        var rawMode = RequireString(e, "mode").ToLowerInvariant();
+        // 模式白名单 + 归一化：拼错就回非致命 bad-protocol，
+        // 而不是打开一个行为未知的窗。归一化后 FileDialogSupport 直接用规范值判断。
+        var mode = rawMode switch
+        {
+            "open" => "open",
+            "openmultiple" => "openMultiple",
+            "save" => "save",
+            "folder" => "folder",
+            _ => throw new ProtocolException("bad-protocol", $"未知的文件对话框模式 \"{rawMode}\""),
+        };
+
+        return new FileDialogMessage
+        {
+            Id = RequireString(e, "id"),
+            Mode = mode,
+            Title = TryString(e, "title"),
+            InitialDir = TryString(e, "initialDir"),
+            Filter = TryString(e, "filter"),
+            DefaultName = TryString(e, "defaultName"),
+        };
+    }
 
     private static WindowSpec ParseWindow(JsonElement e)
     {

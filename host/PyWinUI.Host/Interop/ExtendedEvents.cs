@@ -137,9 +137,9 @@ internal static class ExtendedEvents
                 }
 
             case "colorChanged":
-                if (element is ColorPicker picker)
+                if (element is CustomColorPicker picker)
                 {
-                    picker.ColorChanged += (_, _) => Post(new JsonObject { ["color"] = ColorText(picker.Color) });
+                    picker.ColorChanged += color => Post(new JsonObject { ["color"] = ColorText(color) });
                     return true;
                 }
 
@@ -384,8 +384,8 @@ internal static class ExtendedEvents
             case RatingControl rating:
                 rating.ValueChanged += (_, _) => Change(new JsonObject { ["value"] = rating.Value });
                 return true;
-            case ColorPicker picker:
-                picker.ColorChanged += (_, _) => Change(new JsonObject { ["color"] = ColorText(picker.Color) });
+            case CustomColorPicker picker:
+                picker.ColorChanged += color => Change(new JsonObject { ["color"] = ColorText(color) });
                 return true;
             case AutoSuggestBox suggest:
                 suggest.TextChanged += (_, _) => Change(new JsonObject { ["text"] = suggest.Text });

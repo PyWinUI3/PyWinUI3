@@ -301,7 +301,7 @@ internal static class ExtendedProperties
                 }
                 return false;
             case "color":
-                if (e is ColorPicker picker && ValueParsers.AsColor(v) is { } color)
+                if (e is CustomColorPicker picker && ValueParsers.AsColor(v) is { } color)
                 {
                     picker.Color = color;
                     return true;
@@ -441,9 +441,9 @@ internal static class ExtendedProperties
                         : TwoPaneViewPriority.Pane1;
                 return true;
             case "isMoreButtonVisible":
-                if (e is ColorPicker more && ValueParsers.AsBool(v) is { } moreVisible)
-                    more.IsMoreButtonVisible = moreVisible;
-                return true;
+                // 自绘调色框没有"更多"按钮这一概念，属性保留以兼容旧代码，
+                // 消费掉但不产生视觉效果（避免报未知属性告警）。
+                return e is CustomColorPicker;
 
             default:
                 return false;

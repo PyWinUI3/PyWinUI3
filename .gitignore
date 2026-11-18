@@ -32,3 +32,6 @@ Thumbs.db
 # ---- 内部规划文档 ----
 # 本地保留，不随仓库公开
 PLAN.md
+
+# ---- 示例运行时产物 ----
+examples/*_result.txt

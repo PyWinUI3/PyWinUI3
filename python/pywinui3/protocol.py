@@ -132,6 +132,35 @@ def dialog(title: str, body: str, kind: str = "info") -> dict[str, Any]:
     return {"op": "dialog", "title": title, "body": body, "kind": kind}
 
 
+def file_dialog(
+    request_id: str,
+    mode: str,
+    *,
+    title: str | None = None,
+    initial_dir: str | None = None,
+    filter: str | None = None,
+    default_name: str | None = None,
+) -> dict[str, Any]:
+    """打开文件选择对话框（自绘，不用原生 Picker）。
+
+    ``mode`` 取 ``open`` / ``openMultiple`` / ``save`` / ``folder``。
+    宿主回一条 ``t="fileDialogResult"`` 的消息，用 ``id`` 配对。
+    """
+    modes = {"open", "openMultiple", "save", "folder"}
+    if mode not in modes:
+        raise ValueError(f"未知的文件对话框模式: {mode!r}，可选 {sorted(modes)}")
+    message: dict[str, Any] = {"op": "fileDialog", "id": request_id, "mode": mode}
+    if title is not None:
+        message["title"] = title
+    if initial_dir is not None:
+        message["initialDir"] = initial_dir
+    if filter is not None:
+        message["filter"] = filter
+    if default_name is not None:
+        message["defaultName"] = default_name
+    return message
+
+
 def close(code: int = 0) -> dict[str, Any]:
     return {"op": "close", "code": code}
 

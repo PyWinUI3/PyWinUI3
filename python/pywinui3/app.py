@@ -66,6 +66,7 @@ class App:
         self._node_seq = 0
         self._handler_seq = 0
         self._query_seq = 0
+        self._file_seq = 0
 
         self._nodes: dict[str, Any] = {}
         self._handlers: dict[str, Callable[..., Any]] = {}
@@ -567,6 +568,81 @@ class App:
                 self._graceful = True
                 self._running = False
                 raise HostExited("宿主在查询过程中退出", host.exit_code, host.stderr_text)
+
+            self._inbox.append(message)
+
+    def file_dialog(
+        self,
+        mode: str,
+        *,
+        title: str | None = None,
+        initial_dir: str | None = None,
+        filter: str | None = None,
+        default_name: str | None = None,
+        timeout: float | None = 300.0,
+    ) -> list[str]:
+        """弹出文件选择对话框，同步返回选中的路径列表。
+
+        宿主用 WinUI 基础控件自绘这个对话框（不用原生 FilePicker），
+        支持四种 ``mode``：
+
+        - ``"open"``：选单个已存在文件
+        - ``"openMultiple"``：多选，返回多个路径
+        - ``"save"``：浏览目录 + 输入文件名，文件可以不存在
+        - ``"folder"``：选一个目录
+
+        ``filter`` 是分号分隔的扩展名，如 ``"*.txt;*.py"``（也接受
+        ``"图片|*.png;*.jpg"`` 这种带标签的写法）；``initial_dir`` 指定
+        打开时所在目录，``default_name`` 预填文件名。
+
+        返回路径列表；用户取消返回空列表。默认等 300 秒——模态对话框
+        由人操作，不像 query 那样几毫秒就能回。传 ``timeout=None`` 可无限等。
+
+        等待期间到达的事件不丢，暂存到 ``_inbox`` 下一轮派发，所以在回调里
+        调用也安全。宿主中途退出抛 ``HostExited``，超时抛 ``HostTimeout``。
+        """
+        self._flush_patches()
+        if self._host is None:
+            raise RuntimeError("宿主尚未启动，无法弹出文件对话框")
+
+        self._file_seq += 1
+        request_id = f"f{self._file_seq}"
+        host = self._host
+        host.send(protocol.file_dialog(
+            request_id,
+            mode,
+            title=title,
+            initial_dir=initial_dir,
+            filter=filter,
+            default_name=default_name,
+        ))
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise HostTimeout(f"文件对话框超时（{timeout}s）")
+
+            try:
+                message = host.recv(timeout=min(remaining, 0.1) if remaining is not None else 0.1)
+            except HostTimeout:
+                continue
+
+            if (message.get("t") == "fileDialogResult"
+                    and message.get("id") == request_id):
+                if not message.get("ok", False):
+                    # 用户取消是正常的空结果，不是错误；只有真正的故障才带 error
+                    error = message.get("error")
+                    if error and error != "用户取消":
+                        raise UiError("fileDialog", str(error))
+                    return []
+                paths = message.get("paths")
+                return [str(p) for p in paths] if isinstance(paths, list) else []
+
+            if message.get("t") == "bye":
+                self._graceful = True
+                self._running = False
+                raise HostExited("宿主在文件对话框期间退出", host.exit_code, host.stderr_text)
 
             self._inbox.append(message)
 

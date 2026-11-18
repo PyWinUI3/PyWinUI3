@@ -112,6 +112,42 @@ public sealed class OutboundTests
     }
 
     [Fact]
+    public void FileDialogResult_SuccessCarriesPathsAndNoError()
+    {
+        var json = ParseObject(Outbound.FileDialogResult(
+            "f1", true, new[] { @"D:\a.txt", @"D:\b.txt" }));
+
+        Assert.Equal("fileDialogResult", (string?)json["t"]);
+        Assert.Equal("f1", (string?)json["id"]);
+        Assert.True((bool?)json["ok"]);
+        Assert.Null(json["error"]);
+        var paths = json["paths"]!.AsArray();
+        Assert.Equal(2, paths.Count);
+        Assert.Equal(@"D:\a.txt", (string?)paths[0]);
+        Assert.Equal(@"D:\b.txt", (string?)paths[1]);
+    }
+
+    [Fact]
+    public void FileDialogResult_CancelHasNoPaths()
+    {
+        var json = ParseObject(Outbound.FileDialogResult("f1", false, null, "用户取消"));
+
+        Assert.False((bool?)json["ok"]);
+        Assert.Equal("用户取消", (string?)json["error"]);
+        Assert.Null(json["paths"]);
+    }
+
+    [Fact]
+    public void FileDialogResult_SingleLineWithBackslashes()
+    {
+        // Windows 路径含反斜杠，JSON 里会被转义，但消息体不能有裸换行
+        var line = Outbound.FileDialogResult("f1", true, new[] { @"C:\Users\测试\文件.txt" });
+        Assert.DoesNotContain("\n", line);
+        Assert.DoesNotContain("\r", line);
+        Assert.Contains("测试", line); // 中文不转义
+    }
+
+    [Fact]
     public void EveryMessage_IsSingleLine()
     {
         var messages = new[]
@@ -122,6 +158,7 @@ public sealed class OutboundTests
             Outbound.Result("q", true, JsonValue.Create(1)),
             Outbound.Warning("w"),
             Outbound.MicroDone("m", true),
+            Outbound.FileDialogResult("f", true, new[] { @"C:\a\b.txt" }),
             Outbound.Error("code", "msg"),
             Outbound.Bye(0),
         };
