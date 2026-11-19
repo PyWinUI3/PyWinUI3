@@ -10,6 +10,7 @@ using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Shapes;
+using Microsoft.Graphics.Canvas.UI.Xaml;
 using Windows.Foundation;
 using Windows.UI;
 using XamlPath = Microsoft.UI.Xaml.Shapes.Path;
@@ -565,6 +566,16 @@ internal static class ExtendedProperties
                         TranslateX = offsetX,
                         TranslateY = offsetY,
                     };
+                    return true;
+                }
+
+                return false;
+
+            case "shapes":
+                // Win2D 画布的图元数组：一条 patch 换整块画面，由 GPU 重绘
+                if (e is CanvasControl canvas2d && v is JsonArray shapes)
+                {
+                    Canvas2DSupport.SetShapes(canvas2d, shapes);
                     return true;
                 }
 
@@ -1138,7 +1149,7 @@ internal static class ExtendedProperties
     /// 把路径字符串拆成「命令字符 / 数字」混合 token。
     /// 兼容 "M 1,2 L 3 4"、"M1,2L3,4"、"M1-2"（负号直接跟数字）等写法。
     /// </summary>
-    private static List<object> TokenizePath(string data)
+    internal static List<object> TokenizePath(string data)
     {
         var tokens = new List<object>(data.Length / 2);
         var i = 0;

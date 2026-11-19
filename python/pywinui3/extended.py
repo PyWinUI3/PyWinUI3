@@ -698,6 +698,37 @@ class Polyline(Polygon):
     _type = "Polyline"
 
 
+class Canvas2D(Widget):
+    """Win2D 立即模式画布：图元数组一次下发，宿主在 GPU 上重绘。
+
+    与 :class:`Canvas` 的分工：
+
+    - :class:`Canvas`：每个图元是独立 XAML 元素，能单独绑事件、单独改属性，
+      适合"图元不多、要逐个交互"的编辑器。
+    - :class:`Canvas2D`：整块数组一条 patch，图元再多也只花一次序列化，
+      适合"几千图元、要满帧"的渲染。代价是图元不是 UIElement，
+      命中测试需要自己在 Python 侧算。
+
+    图元格式（``type`` 决定其余字段）::
+
+        {"type": "line",    "x1", "y1", "x2", "y2", "stroke", "strokeWidth"}
+        {"type": "rect",    "x", "y", "w", "h", "radius", "fill", "stroke", "strokeWidth"}
+        {"type": "ellipse", "cx", "cy", "rx", "ry", "fill", "stroke", "strokeWidth"}
+        {"type": "path",    "d", "fill", "stroke", "strokeWidth"}
+        {"type": "text",    "x", "y", "text", "size", "color"}
+
+    ``d`` 与 :class:`Path` 用同一套 SVG 路径语法。
+    改 ``shapes`` 会触发整块重绘；``shapes`` 也可以直接赋值。
+    """
+
+    _type = "Canvas2D"
+
+    def __init__(self, master: Any, shapes: list[dict[str, Any]] | None = None, **kwargs: Any):
+        if shapes is not None:
+            kwargs["shapes"] = shapes
+        super().__init__(master, **kwargs)
+
+
 __all__ = [
     "NumberBox",
     "PasswordBox",
@@ -742,4 +773,5 @@ __all__ = [
     "Path",
     "Polygon",
     "Polyline",
+    "Canvas2D",
 ]

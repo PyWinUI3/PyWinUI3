@@ -50,6 +50,10 @@ internal static class ExtendedControls
                     Clip = null,
                 };
 
+            // Win2D 立即模式画布：整块图元数组一次下发，GPU 重绘
+            case "Canvas2D":
+                return Canvas2DSupport.Create();
+
             // 图元默认描边 1px、无填充，具体值由 fill / stroke / strokeWidth 属性覆盖
             case "Rect":
                 return new Rectangle { StrokeThickness = 1 };
