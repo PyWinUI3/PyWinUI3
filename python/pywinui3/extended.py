@@ -603,6 +603,101 @@ class RefreshContainer(Widget):
         super().__init__(master, **kwargs)
 
 
+class Canvas(Widget):
+    """绝对定位画布：子控件用 ``left`` / ``top`` 定位，超出边界不裁切。
+
+    ``view`` 控制整体缩放与平移，一条属性搞定，开销与图元数量无关::
+
+        canvas = ui.Canvas(win, width=800, height=600)
+        ui.Rect(canvas, left=20, top=30, width=100, height=60, fill="#0F6CBD")
+        canvas.view = {"scale": 1.5, "offsetX": 40, "offsetY": -20}
+    """
+
+    _type = "Canvas"
+
+    def __init__(self, master: Any, *, view: dict[str, Any] | None = None, **kwargs: Any):
+        if view is not None:
+            kwargs["view"] = view
+        super().__init__(master, **kwargs)
+
+
+class _Shape(Widget):
+    """图元基类：统一 ``fill`` / ``stroke`` / ``stroke_width`` 入口。
+
+    三个参数都只在非 None 时下发，避免把宿主默认值覆盖成空。
+    """
+
+    def __init__(
+        self,
+        master: Any,
+        *,
+        fill: str | None = None,
+        stroke: str | None = None,
+        stroke_width: float | None = None,
+        **kwargs: Any,
+    ):
+        if fill is not None:
+            kwargs["fill"] = fill
+        if stroke is not None:
+            kwargs["stroke"] = stroke
+        if stroke_width is not None:
+            kwargs["stroke_width"] = stroke_width
+        super().__init__(master, **kwargs)
+
+
+class Rect(_Shape):
+    """矩形。``left`` / ``top`` 定位，``radius_x`` / ``radius_y`` 圆角。"""
+
+    _type = "Rect"
+
+
+class Ellipse(_Shape):
+    """椭圆，尺寸由 ``width`` / ``height`` 决定。"""
+
+    _type = "Ellipse"
+
+
+class Line(_Shape):
+    """直线：``x1, y1`` → ``x2, y2``。"""
+
+    _type = "Line"
+
+    def __init__(self, master: Any, x1: float = 0, y1: float = 0, x2: float = 0, y2: float = 0, **kwargs: Any):
+        kwargs.update({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
+        super().__init__(master, **kwargs)
+
+
+class Path(_Shape):
+    """路径，``d`` 用 SVG 路径语法（M / L / C / Q / A / Z …）。
+
+    XAML 的路径标记与 SVG 基本互通，可以直接把 SVG 里的 d 传进来。
+    """
+
+    _type = "Path"
+
+    def __init__(self, master: Any, d: str = "", **kwargs: Any):
+        if d:
+            kwargs["d"] = d
+        super().__init__(master, **kwargs)
+
+
+class Polygon(_Shape):
+    """闭合多边形，``points`` 用 ``[[x, y], ...]``。"""
+
+    _type = "Polygon"
+
+    def __init__(self, master: Any, points: list[list[float]] | None = None, **kwargs: Any):
+        if points is not None:
+            kwargs["points"] = points
+        super().__init__(master, **kwargs)
+
+
+class Polyline(Polygon):
+    """折线（不闭合），与 Polygon 同构。"""
+
+    _type = "Polyline"
+
+
 __all__ = [
     "NumberBox",
     "PasswordBox",
@@ -640,4 +735,11 @@ __all__ = [
     "RelativePanel",
     "TwoPaneView",
     "RefreshContainer",
+    "Canvas",
+    "Rect",
+    "Ellipse",
+    "Line",
+    "Path",
+    "Polygon",
+    "Polyline",
 ]

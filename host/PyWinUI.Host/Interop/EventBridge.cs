@@ -3,6 +3,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
 using PyWinUI.Host.Protocol;
 using PyWinUI.Host.Rendering;
 using Windows.Media.Playback;
@@ -285,6 +286,10 @@ internal sealed class EventBridge
             case "pointerEntered":
             case "pointerExited":
             case "pointerPressed":
+            case "pointerMoved":
+            case "pointerReleased":
+            case "pointerCanceled":
+            case "pointerCaptureLost":
                 BindPointer(element, nodeId, eventName, Raise);
                 break;
 
@@ -437,21 +442,75 @@ internal sealed class EventBridge
         switch (eventName)
         {
             case "pointerEntered":
-                element.PointerEntered += (_, _) => raise("pointerEntered", new JsonObject());
+                element.PointerEntered += (_, e) => raise("pointerEntered", PointerPayload(e, element));
                 break;
 
             case "pointerExited":
-                element.PointerExited += (_, _) => raise("pointerExited", new JsonObject());
+                element.PointerExited += (_, e) => raise("pointerExited", PointerPayload(e, element));
                 break;
 
             case "pointerPressed":
-                element.PointerPressed += (_, _) => raise("pointerPressed", new JsonObject());
+                element.PointerPressed += (_, e) =>
+                {
+                    // 同时绑了 pointerMoved 说明这是一个拖动手势：
+                    // 按下时捕获指针，否则鼠标一移出图元事件就断了。
+                    if (IsBound(nodeId, "pointerMoved"))
+                    {
+                        element.CapturePointer(e.Pointer);
+                    }
+
+                    raise("pointerPressed", PointerPayload(e, element));
+                };
+                break;
+
+            // 拖动三件套：只有 pressed 没法做画布拖拽，必须有 moved / released
+            case "pointerMoved":
+                element.PointerMoved += (_, e) => raise("pointerMoved", PointerPayload(e, element));
+                break;
+
+            case "pointerReleased":
+                element.PointerReleased += (_, e) =>
+                {
+                    if (IsBound(nodeId, "pointerMoved"))
+                    {
+                        element.ReleasePointerCapture(e.Pointer);
+                    }
+
+                    raise("pointerReleased", PointerPayload(e, element));
+                };
+                break;
+
+            case "pointerCanceled":
+                element.PointerCanceled += (_, e) => raise("pointerCanceled", PointerPayload(e, element));
+                break;
+
+            case "pointerCaptureLost":
+                element.PointerCaptureLost += (_, e) => raise("pointerCaptureLost", PointerPayload(e, element));
                 break;
 
             default:
                 _warn($"节点 {nodeId}: 未知指针事件 \"{eventName}\"");
                 break;
         }
+    }
+
+    /// <summary>
+    /// 指针事件负载：坐标取相对**父容器**（Canvas）而不是图元自身。
+    /// 图元在拖动过程中自己就在移动，用相对自身的坐标会一直漂，
+    /// 没法直接换算成 left / top。
+    /// </summary>
+    private static JsonObject PointerPayload(PointerRoutedEventArgs e, FrameworkElement element)
+    {
+        UIElement reference = element.Parent as UIElement ?? element;
+        var point = e.GetCurrentPoint(reference);
+
+        return new JsonObject
+        {
+            ["x"] = point.Position.X,
+            ["y"] = point.Position.Y,
+            ["isLeftButtonPressed"] = point.Properties.IsLeftButtonPressed,
+            ["isRightButtonPressed"] = point.Properties.IsRightButtonPressed,
+        };
     }
 
     private void BindMediaEvent(

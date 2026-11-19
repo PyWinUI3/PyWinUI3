@@ -512,6 +512,13 @@ Win32 子类化拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
 | `RichTextBlock` | `RichTextBlock`（`text` 纯文本 / `richText` 分段格式） | 否 |
 | `RichEditBox` | `RichEditBox` | 否 |
 | `Icon` | `FontIcon`（`glyph` + 通用 `fontSize` / `foreground`） | 否 |
+| `Canvas` | `Canvas`（子元素用 `left` / `top` 绝对定位，不裁切） | 是 |
+| `Rect` | `Rectangle` | 否 |
+| `Ellipse` | `Ellipse` | 否 |
+| `Line` | `Line` | 否 |
+| `Path` | `Path`（`d` 用 SVG 路径语法） | 否 |
+| `Polygon` | `Polygon` | 否 |
+| `Polyline` | `Polyline` | 否 |
 | `AutoSuggestBox` | `AutoSuggestBox` | 否 |
 | `DatePicker` | `DatePicker` | 否 |
 | `TimePicker` | `TimePicker` | 否 |
@@ -574,6 +581,101 @@ Win32 子类化拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
 
 > `RichEditBox` 暂不支持 `richText`：它的富文本要经 `ITextRange` 逐段设置
 > `CharacterFormat`，与用户的撤销栈交织容易出问题，当前按纯文本降级并打一条告警。
+
+#### 画布与图元
+
+`Canvas` 是绝对定位容器，子元素用 `left` / `top` 定位，超出边界不裁切
+（等同 SVG 的 `overflow: visible`）。
+
+```json
+{
+  "id": "n10",
+  "type": "Canvas",
+  "props": {
+    "width": 800,
+    "height": 600,
+    "view": { "scale": 1.5, "offsetX": 40, "offsetY": -20 }
+  }
+}
+```
+
+**图元属性**
+
+| 属性 | 适用 | 说明 |
+|---|---|---|
+| `left` / `top` | 任意子节点 | 相对父 `Canvas` 左上角的偏移 |
+| `fill` | 图元 | 填充色，格式同 `foreground`；不填则无填充 |
+| `stroke` | 图元 | 描边色；不填则无描边 |
+| `strokeWidth` | 图元 | 描边宽度，默认 `1` |
+| `strokeDashArray` | 图元 | 虚线样式，如 `[4, 2]` |
+| `lineCap` | 图元 | `flat` / `round` / `square` |
+| `lineJoin` | 图元 | `miter` / `bevel` / `round` |
+| `d` | `Path` | SVG 路径数据，支持 `M L H V C S Q T A Z`（大小写均可） |
+| `points` | `Polygon` / `Polyline` | 顶点数组 `[[x, y], ...]` |
+| `x1` / `y1` / `x2` / `y2` | `Line` | 两个端点 |
+| `radiusX` / `radiusY` | `Rect` | 圆角半径 |
+| `transform` | 任意节点 | 组合变换，见下 |
+| `view` | `Canvas` | 视图缩放与平移，见下 |
+
+**`d` 的解析**
+
+宿主自己实现了一套 SVG 路径解析，**不依赖** XAML 的字符串解析（WinUI 3 的
+`XamlReader` 不接受 `Data="M0,0 L10,10"` 这种写法）。支持命令：
+
+| 命令 | 含义 | 命令 | 含义 |
+|---|---|---|---|
+| `M` / `m` | 起点 | `S` / `s` | 平滑三次贝塞尔 |
+| `L` / `l` | 直线 | `Q` / `q` | 二次贝塞尔 |
+| `H` / `h` | 水平线 | `T` / `t` | 平滑二次贝塞尔 |
+| `V` / `v` | 垂直线 | `A` / `a` | 圆弧 |
+| `C` / `c` | 三次贝塞尔 | `Z` / `z` | 闭合 |
+
+小写为相对坐标。支持隐式重复参数（`"L 1 2 3 4"` 等于两段直线）、省略分隔符
+（`"M1-2"`）。解析失败会打一条告警，保留已经解析出来的部分，不中断渲染。
+
+**`transform`（单个图元的变换）**
+
+```json
+"transform": { "rotate": 15, "scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0,
+               "originX": 0.5, "originY": 0.5 }
+```
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `rotate` | 0 | 旋转角度（度） |
+| `scaleX` / `scaleY` | 1 | 缩放 |
+| `translateX` / `translateY` | 0 | 平移 |
+| `originX` / `originY` | 0.5 | 变换原点，按元素宽高的比例 |
+
+`rotate` 是它的简写形式（等价于只给旋转、原点居中）。
+
+**`view`（整个画布的视图）**
+
+```json
+"view": { "scale": 1.5, "offsetX": 40, "offsetY": -20 }
+```
+
+作用于画布容器的 `RenderTransform`，**一条属性生效，开销与图元数量无关**。
+缩放和平移必须走这里，不要逐个改图元的 `left` / `top`——那会让开销随图元数线性增长。
+
+**指针事件**
+
+画布交互依赖带坐标的指针事件：
+
+| 事件 | 负载 |
+|---|---|
+| `pointerPressed` | `{x, y, isLeftButtonPressed, isRightButtonPressed}` |
+| `pointerMoved` | 同上 |
+| `pointerReleased` | 同上 |
+| `pointerCanceled` | 同上 |
+| `pointerCaptureLost` | 同上 |
+| `pointerEntered` / `pointerExited` | 同上 |
+
+`x` / `y` 相对**父容器**而不是图元自身——图元在拖动过程中自己会移动，用相对自身的
+坐标会一直漂。
+
+同一个节点同时绑了 `pointerPressed` 和 `pointerMoved` 时，按下会自动捕获指针，
+鼠标移出图元也会继续收到 `pointerMoved`，松开时自动释放。这是拖动手势的前提。
 
 #### 标签页：`PinnedTab` 与 `TabPage`
 

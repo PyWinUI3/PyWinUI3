@@ -3,6 +3,8 @@ using System.Text.Json.Nodes;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Shapes;
+using XamlPath = Microsoft.UI.Xaml.Shapes.Path;
 
 namespace PyWinUI.Host.Rendering;
 
@@ -38,6 +40,34 @@ internal static class ExtendedControls
 
             case "RichTextBlock":
                 return new RichTextBlock { TextWrapping = TextWrapping.Wrap };
+
+            // ---------------- 画布与图元 ----------------
+            // Canvas 是 Panel 子类，ChildHostOf 直接认，子节点挂载规则不用改。
+            case "Canvas":
+                return new Canvas
+                {
+                    // 不裁切：图元允许超出画布边界（和 SVG 的 overflow:visible 一致）
+                    Clip = null,
+                };
+
+            // 图元默认描边 1px、无填充，具体值由 fill / stroke / strokeWidth 属性覆盖
+            case "Rect":
+                return new Rectangle { StrokeThickness = 1 };
+
+            case "Ellipse":
+                return new Ellipse { StrokeThickness = 1 };
+
+            case "Line":
+                return new Line { StrokeThickness = 1 };
+
+            case "Path":
+                return new XamlPath { StrokeThickness = 1 };
+
+            case "Polygon":
+                return new Polygon { StrokeThickness = 1 };
+
+            case "Polyline":
+                return new Polyline { StrokeThickness = 1 };
 
             case "RichEditBox":
                 return new RichEditBox();

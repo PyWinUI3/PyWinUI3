@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using Microsoft.UI.Text;
@@ -5,9 +6,13 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Documents;
+using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Xaml.Shapes;
+using Windows.Foundation;
 using Windows.UI;
+using XamlPath = Microsoft.UI.Xaml.Shapes.Path;
 
 namespace PyWinUI.Host.Rendering;
 
@@ -286,6 +291,273 @@ internal static class ExtendedProperties
                 }
 
                 return false;
+
+            // ================= 画布与图元 =================
+            case "left":
+                // Canvas 的绝对定位附加属性；不在 Canvas 里时设置也无害
+                if (ValueParsers.AsDouble(v) is { } left)
+                {
+                    Canvas.SetLeft(e, left);
+                    return true;
+                }
+
+                return false;
+
+            case "top":
+                if (ValueParsers.AsDouble(v) is { } top)
+                {
+                    Canvas.SetTop(e, top);
+                    return true;
+                }
+
+                return false;
+
+            case "fill":
+                if (e is Shape fillShape && ValueParsers.AsBrush(v) is { } fillBrush)
+                {
+                    fillShape.Fill = fillBrush;
+                    return true;
+                }
+
+                return false;
+
+            case "stroke":
+                if (e is Shape strokeShape && ValueParsers.AsBrush(v) is { } strokeBrush)
+                {
+                    strokeShape.Stroke = strokeBrush;
+                    return true;
+                }
+
+                return false;
+
+            case "strokeWidth":
+                if (e is Shape widthShape && ValueParsers.AsDouble(v) is { } strokeWidth)
+                {
+                    widthShape.StrokeThickness = strokeWidth;
+                    return true;
+                }
+
+                return false;
+
+            case "d":
+                // Path 的几何数据，直接吃 SVG 的 d 语法（XAML 路径标记与之基本兼容）
+                if (e is XamlPath pathNode)
+                {
+                    var data = ValueParsers.AsString(v);
+                    if (string.IsNullOrWhiteSpace(data))
+                    {
+                        pathNode.Data = null;
+                        return true;
+                    }
+
+                    try
+                    {
+                        pathNode.Data = ParsePathData(data);
+                    }
+                    catch (Exception ex)
+                    {
+                        warn($"path d 解析失败: {ex.Message}");
+                    }
+
+                    return true;
+                }
+
+                return false;
+
+            case "rotate":
+                if (ValueParsers.AsDouble(v) is { } angle)
+                {
+                    e.RenderTransformOrigin = new Point(0.5, 0.5);
+                    e.RenderTransform = new CompositeTransform { Rotation = angle };
+                    return true;
+                }
+
+                return false;
+
+            // 完整变换：旋转 / 缩放 / 平移一次给齐，绕 originX/originY（0-1 比例）生效
+            case "transform":
+                if (v is JsonObject transform)
+                {
+                    var scaleX = ValueParsers.AsDouble(transform["scaleX"]) ?? 1;
+                    var scaleY = ValueParsers.AsDouble(transform["scaleY"]) ?? 1;
+                    var rotation = ValueParsers.AsDouble(transform["rotate"]) ?? 0;
+                    var translateX = ValueParsers.AsDouble(transform["translateX"]) ?? 0;
+                    var translateY = ValueParsers.AsDouble(transform["translateY"]) ?? 0;
+                    var originX = ValueParsers.AsDouble(transform["originX"]) ?? 0.5;
+                    var originY = ValueParsers.AsDouble(transform["originY"]) ?? 0.5;
+
+                    e.RenderTransformOrigin = new Point(originX, originY);
+                    e.RenderTransform = new CompositeTransform
+                    {
+                        ScaleX = scaleX,
+                        ScaleY = scaleY,
+                        Rotation = rotation,
+                        TranslateX = translateX,
+                        TranslateY = translateY,
+                    };
+                    return true;
+                }
+
+                return false;
+
+            // ---- 描边细节 ----
+            case "strokeDashArray":
+                if (e is Shape dashShape && v is JsonArray dashArray)
+                {
+                    var dashes = new DoubleCollection();
+                    foreach (var item in dashArray)
+                    {
+                        if (ValueParsers.AsDouble(item) is { } dashValue && dashValue >= 0)
+                        {
+                            dashes.Add(dashValue);
+                        }
+                    }
+
+                    dashShape.StrokeDashArray = dashes;
+                    return true;
+                }
+
+                return false;
+
+            case "lineCap":
+                if (e is Shape capShape && ValueParsers.AsString(v) is { } cap)
+                {
+                    capShape.StrokeStartLineCap = ParsePenCap(cap);
+                    capShape.StrokeEndLineCap = ParsePenCap(cap);
+                    return true;
+                }
+
+                return false;
+
+            case "lineJoin":
+                if (e is Shape joinShape && ValueParsers.AsString(v) is { } join)
+                {
+                    joinShape.StrokeLineJoin = join.ToLowerInvariant() switch
+                    {
+                        "round" => PenLineJoin.Round,
+                        "bevel" => PenLineJoin.Bevel,
+                        _ => PenLineJoin.Miter,
+                    };
+                    return true;
+                }
+
+                return false;
+
+            // ---- Line 端点 ----
+            case "x1":
+                if (e is Line lineX1 && ValueParsers.AsDouble(v) is { } x1)
+                {
+                    lineX1.X1 = x1;
+                    return true;
+                }
+
+                return false;
+
+            case "y1":
+                if (e is Line lineY1 && ValueParsers.AsDouble(v) is { } y1)
+                {
+                    lineY1.Y1 = y1;
+                    return true;
+                }
+
+                return false;
+
+            case "x2":
+                if (e is Line lineX2 && ValueParsers.AsDouble(v) is { } x2)
+                {
+                    lineX2.X2 = x2;
+                    return true;
+                }
+
+                return false;
+
+            case "y2":
+                if (e is Line lineY2 && ValueParsers.AsDouble(v) is { } y2)
+                {
+                    lineY2.Y2 = y2;
+                    return true;
+                }
+
+                return false;
+
+            // ---- 多边形顶点：[[x,y], ...] ----
+            case "points":
+                if (e is Polygon || e is Polyline)
+                {
+                    if (v is not JsonArray points)
+                    {
+                        return true;
+                    }
+
+                    var collection = new PointCollection();
+                    foreach (var item in points)
+                    {
+                        if (item is JsonArray pair && pair.Count >= 2)
+                        {
+                            var px = ValueParsers.AsDouble(pair[0]);
+                            var py = ValueParsers.AsDouble(pair[1]);
+                            if (px is { } pxValue && py is { } pyValue)
+                            {
+                                collection.Add(new Point(pxValue, pyValue));
+                                continue;
+                            }
+                        }
+
+                        warn("points 需要 [[x, y], ...] 形式的数组");
+                    }
+
+                    if (e is Polygon polygon)
+                    {
+                        polygon.Points = collection;
+                    }
+                    else
+                    {
+                        ((Polyline)e).Points = collection;
+                    }
+
+                    return true;
+                }
+
+                return false;
+
+            // ---- Rect 圆角 ----
+            case "radiusX":
+                if (e is Rectangle rectX && ValueParsers.AsDouble(v) is { } radiusX)
+                {
+                    rectX.RadiusX = radiusX;
+                    return true;
+                }
+
+                return false;
+
+            case "radiusY":
+                if (e is Rectangle rectY && ValueParsers.AsDouble(v) is { } radiusY)
+                {
+                    rectY.RadiusY = radiusY;
+                    return true;
+                }
+
+                return false;
+
+            case "view":
+                // 画布视图变换：一次给齐缩放和平移，避免三个属性互相覆盖
+                if (e is Canvas viewCanvas && v is JsonObject view)
+                {
+                    var scale = ValueParsers.AsDouble(view["scale"]) ?? 1;
+                    var offsetX = ValueParsers.AsDouble(view["offsetX"]) ?? 0;
+                    var offsetY = ValueParsers.AsDouble(view["offsetY"]) ?? 0;
+                    viewCanvas.RenderTransformOrigin = new Point(0, 0);
+                    viewCanvas.RenderTransform = new CompositeTransform
+                    {
+                        ScaleX = scale,
+                        ScaleY = scale,
+                        TranslateX = offsetX,
+                        TranslateY = offsetY,
+                    };
+                    return true;
+                }
+
+                return false;
             case "value":
                 return ApplyExtendedValue(e, v, warn);
             case "items":
@@ -477,6 +749,451 @@ internal static class ExtendedProperties
     // ------------------------------------------------------------------
     // 与主 switch 同名的 key：只接管扩展控件
     // ------------------------------------------------------------------
+
+    private static PenLineCap ParsePenCap(string cap) => cap.ToLowerInvariant() switch
+    {
+        "round" => PenLineCap.Round,
+        "square" => PenLineCap.Square,
+        _ => PenLineCap.Flat,
+    };
+
+    /// <summary>
+    /// 把 SVG 路径标记（M / L / H / V / C / S / Q / T / A / Z）解析成 PathGeometry。
+    ///
+    /// 不用 XamlReader：WinUI 3 的 XamlReader 不接受 <c>Data="M0,0 L10,10"</c> 这种
+    /// 字符串（实测连最简单的路径都报 "Value does not fall within the expected range"），
+    /// 所以这里自己做词法 + 构造，既可靠也不依赖 XAML 解析器。
+    ///
+    /// 支持相对命令（小写）与隐式重复参数（如 "L 1 2 3 4" 等于两段）。
+    /// 弧命令 A 直接映射到 ArcSegment，不转成贝塞尔（WinUI 原生支持弧）。
+    /// </summary>
+    private static Geometry? ParsePathData(string data)
+    {
+        if (string.IsNullOrWhiteSpace(data))
+        {
+            return null;
+        }
+
+        var tokens = TokenizePath(data);
+        if (tokens.Count == 0)
+        {
+            return null;
+        }
+
+        var geometry = new PathGeometry();
+        PathFigure? figure = null;
+
+        double curX = 0, curY = 0;
+        double startX = 0, startY = 0;
+        // 上一个控制点，供 S（三次）与 T（二次）做镜像反射
+        double ctrlX = 0, ctrlY = 0;
+        char previous = '\0';
+
+        var index = 0;
+        var command = 'M';
+
+        bool HasNumber() => index < tokens.Count && tokens[index] is double;
+
+        double ReadNumber()
+        {
+            var value = (double)tokens[index];
+            index++;
+            return value;
+        }
+
+        PathFigure Figure()
+        {
+            if (figure is null)
+            {
+                figure = new PathFigure { StartPoint = new Point(curX, curY), IsClosed = false };
+                geometry.Figures.Add(figure);
+            }
+
+            return figure;
+        }
+
+        while (index < tokens.Count)
+        {
+            if (tokens[index] is char explicitCommand)
+            {
+                command = explicitCommand;
+                index++;
+
+                if (char.ToUpperInvariant(command) == 'Z')
+                {
+                    if (figure is not null)
+                    {
+                        figure.IsClosed = true;
+                    }
+
+                    curX = startX;
+                    curY = startY;
+                    previous = command;
+                    continue;
+                }
+            }
+
+            var relative = char.IsLower(command);
+            var upper = char.ToUpperInvariant(command);
+
+            switch (upper)
+            {
+                case 'M':
+                {
+                    if (!HasNumber())
+                    {
+                        return geometry;
+                    }
+
+                    var x = ReadNumber();
+                    var y = ReadNumber();
+                    if (relative)
+                    {
+                        x += curX;
+                        y += curY;
+                    }
+
+                    curX = x;
+                    curY = y;
+                    startX = x;
+                    startY = y;
+                    figure = new PathFigure { StartPoint = new Point(x, y), IsClosed = false };
+                    geometry.Figures.Add(figure);
+
+                    // M 后面紧跟的坐标对按 LineTo 处理
+                    command = relative ? 'l' : 'L';
+                    previous = 'M';
+                    break;
+                }
+
+                case 'L':
+                {
+                    while (HasNumber())
+                    {
+                        var x = ReadNumber();
+                        var y = ReadNumber();
+                        if (relative)
+                        {
+                            x += curX;
+                            y += curY;
+                        }
+
+                        curX = x;
+                        curY = y;
+                        Figure().Segments.Add(new LineSegment { Point = new Point(x, y) });
+                    }
+
+                    previous = command;
+                    break;
+                }
+
+                case 'H':
+                {
+                    while (HasNumber())
+                    {
+                        var x = ReadNumber();
+                        if (relative)
+                        {
+                            x += curX;
+                        }
+
+                        curX = x;
+                        Figure().Segments.Add(new LineSegment { Point = new Point(curX, curY) });
+                    }
+
+                    previous = command;
+                    break;
+                }
+
+                case 'V':
+                {
+                    while (HasNumber())
+                    {
+                        var y = ReadNumber();
+                        if (relative)
+                        {
+                            y += curY;
+                        }
+
+                        curY = y;
+                        Figure().Segments.Add(new LineSegment { Point = new Point(curX, curY) });
+                    }
+
+                    previous = command;
+                    break;
+                }
+
+                case 'C':
+                {
+                    while (HasNumber())
+                    {
+                        var x1 = ReadNumber();
+                        var y1 = ReadNumber();
+                        var x2 = ReadNumber();
+                        var y2 = ReadNumber();
+                        var x = ReadNumber();
+                        var y = ReadNumber();
+                        if (relative)
+                        {
+                            x1 += curX;
+                            y1 += curY;
+                            x2 += curX;
+                            y2 += curY;
+                            x += curX;
+                            y += curY;
+                        }
+
+                        ctrlX = x2;
+                        ctrlY = y2;
+                        curX = x;
+                        curY = y;
+                        Figure().Segments.Add(new BezierSegment
+                        {
+                            Point1 = new Point(x1, y1),
+                            Point2 = new Point(x2, y2),
+                            Point3 = new Point(x, y),
+                        });
+                    }
+
+                    previous = command;
+                    break;
+                }
+
+                case 'S':
+                {
+                    while (HasNumber())
+                    {
+                        // 首个控制点 = 上一段第二控制点关于当前点的镜像
+                        var reflect = previous is 'C' or 'c' or 'S' or 's';
+                        var x1 = reflect ? 2 * curX - ctrlX : curX;
+                        var y1 = reflect ? 2 * curY - ctrlY : curY;
+
+                        var x2 = ReadNumber();
+                        var y2 = ReadNumber();
+                        var x = ReadNumber();
+                        var y = ReadNumber();
+                        if (relative)
+                        {
+                            x2 += curX;
+                            y2 += curY;
+                            x += curX;
+                            y += curY;
+                        }
+
+                        ctrlX = x2;
+                        ctrlY = y2;
+                        curX = x;
+                        curY = y;
+                        Figure().Segments.Add(new BezierSegment
+                        {
+                            Point1 = new Point(x1, y1),
+                            Point2 = new Point(x2, y2),
+                            Point3 = new Point(x, y),
+                        });
+                    }
+
+                    previous = command;
+                    break;
+                }
+
+                case 'Q':
+                {
+                    while (HasNumber())
+                    {
+                        var cx = ReadNumber();
+                        var cy = ReadNumber();
+                        var x = ReadNumber();
+                        var y = ReadNumber();
+                        if (relative)
+                        {
+                            cx += curX;
+                            cy += curY;
+                            x += curX;
+                            y += curY;
+                        }
+
+                        ctrlX = cx;
+                        ctrlY = cy;
+                        curX = x;
+                        curY = y;
+                        Figure().Segments.Add(new QuadraticBezierSegment
+                        {
+                            Point1 = new Point(cx, cy),
+                            Point2 = new Point(x, y),
+                        });
+                    }
+
+                    previous = command;
+                    break;
+                }
+
+                case 'T':
+                {
+                    while (HasNumber())
+                    {
+                        var reflect = previous is 'Q' or 'q' or 'T' or 't';
+                        var cx = reflect ? 2 * curX - ctrlX : curX;
+                        var cy = reflect ? 2 * curY - ctrlY : curY;
+
+                        var x = ReadNumber();
+                        var y = ReadNumber();
+                        if (relative)
+                        {
+                            x += curX;
+                            y += curY;
+                        }
+
+                        ctrlX = cx;
+                        ctrlY = cy;
+                        curX = x;
+                        curY = y;
+                        Figure().Segments.Add(new QuadraticBezierSegment
+                        {
+                            Point1 = new Point(cx, cy),
+                            Point2 = new Point(x, y),
+                        });
+                    }
+
+                    previous = command;
+                    break;
+                }
+
+                case 'A':
+                {
+                    while (HasNumber())
+                    {
+                        var rx = ReadNumber();
+                        var ry = ReadNumber();
+                        var rotation = ReadNumber();
+                        var largeArc = ReadNumber() != 0;
+                        var sweep = ReadNumber() != 0;
+                        var x = ReadNumber();
+                        var y = ReadNumber();
+                        if (relative)
+                        {
+                            x += curX;
+                            y += curY;
+                        }
+
+                        // SVG 允许半径为 0，此时按直线处理
+                        if (rx <= 0 || ry <= 0)
+                        {
+                            curX = x;
+                            curY = y;
+                            Figure().Segments.Add(new LineSegment { Point = new Point(x, y) });
+                            continue;
+                        }
+
+                        curX = x;
+                        curY = y;
+                        Figure().Segments.Add(new ArcSegment
+                        {
+                            Size = new Size(rx, ry),
+                            RotationAngle = rotation,
+                            IsLargeArc = largeArc,
+                            SweepDirection = sweep
+                                ? SweepDirection.Clockwise
+                                : SweepDirection.Counterclockwise,
+                            Point = new Point(x, y),
+                        });
+                    }
+
+                    previous = command;
+                    break;
+                }
+
+                case 'Z':
+                    // 前面已在读到 Z 时处理过，这里兜底
+                    if (figure is not null)
+                    {
+                        figure.IsClosed = true;
+                    }
+
+                    curX = startX;
+                    curY = startY;
+                    previous = command;
+                    break;
+
+                default:
+                    // 未知命令：保留已解析部分，别整条丢掉
+                    return geometry;
+            }
+        }
+
+        return geometry;
+    }
+
+    /// <summary>
+    /// 把路径字符串拆成「命令字符 / 数字」混合 token。
+    /// 兼容 "M 1,2 L 3 4"、"M1,2L3,4"、"M1-2"（负号直接跟数字）等写法。
+    /// </summary>
+    private static List<object> TokenizePath(string data)
+    {
+        var tokens = new List<object>(data.Length / 2);
+        var i = 0;
+
+        while (i < data.Length)
+        {
+            var c = data[i];
+
+            if (char.IsWhiteSpace(c) || c == ',')
+            {
+                i++;
+                continue;
+            }
+
+            if (char.IsLetter(c))
+            {
+                tokens.Add(c);
+                i++;
+                continue;
+            }
+
+            var start = i;
+            if (c is '-' or '+')
+            {
+                i++;
+            }
+
+            while (i < data.Length && (char.IsDigit(data[i]) || data[i] == '.'))
+            {
+                i++;
+            }
+
+            // 科学计数法：1e-3
+            if (i < data.Length && data[i] is 'e' or 'E')
+            {
+                i++;
+                if (i < data.Length && data[i] is '-' or '+')
+                {
+                    i++;
+                }
+
+                while (i < data.Length && char.IsDigit(data[i]))
+                {
+                    i++;
+                }
+            }
+
+            if (i == start)
+            {
+                // 无法识别的字符，跳过，避免死循环
+                i++;
+                continue;
+            }
+
+            if (double.TryParse(
+                    data.AsSpan(start, i - start),
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out var value))
+            {
+                tokens.Add(value);
+            }
+        }
+
+        return tokens;
+    }
 
     /// <summary>
     /// 富文本：<c>richText</c> 接受 span 数组，每个元素

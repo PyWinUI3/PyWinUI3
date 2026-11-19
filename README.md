@@ -188,7 +188,7 @@ tools/build_host.ps1          构建 Release 宿主 + 复制进 runtime/
 | 进度 | `ProgressBar` `ProgressRing` |
 | 内容 | `Image` `Media` `WebView2` `Separator` |
 
-**扩展控件**（共 35 种，均为 WinUI 3 / Windows App SDK 1.8 内置类型，含 2 类标签元素）
+**扩展控件**（共 43 种，均为 WinUI 3 / Windows App SDK 1.8 内置类型，含 2 类标签元素）
 
 | 分组 | 类 |
 |---|---|
@@ -197,6 +197,7 @@ tools/build_host.ps1          构建 Release 宿主 + 复制进 runtime/
 | 数据 / 导航 | `GridView` `FlipView` `Pivot` `TabView` `TreeView` `NavigationView` `MenuBar` `CommandBar` `BreadcrumbBar` `ItemsView` `RadioButtons` `SelectorBar` |
 | 标签元素（`TabView` 子节点） | `PinnedTab` `TabPage` |
 | 信息 / 容器 | `InfoBar` `Expander` `BorderBox` `Viewbox` `RelativePanel` `TwoPaneView` `RefreshContainer` |
+| 画布 / 图元 | `Canvas` `Rect` `Ellipse` `Line` `Path` `Polygon` `Polyline` `Icon` |
 
 **变量与工具**：`StringVar` `IntVar` `DoubleVar` `BooleanVar`、`Event`、`dialog()`、
 `PROTOCOL_VERSION`、各异常类。`Widget` 是所有控件的基类。
@@ -701,6 +702,61 @@ panel.animate_width(200, steps=12, interval=16)   # 底层就是一条 micro
 告警走 `t:"warning"`（宿主对同一条 1 秒去重后才写日志），Python 侧默认打到 stderr，可用
 `App(on_warning=...)` 接管；未知 `op` 也是回一条 warning 后忽略，不终止会话。
 
+### 6.8 画布与图元
+
+`Canvas` 是绝对定位容器，子元素用 `left` / `top` 定位：
+
+```python
+canvas = ui.Canvas(win, width=800, height=600)
+
+ui.Rect(canvas, left=40, top=40, width=160, height=100,
+        radius_x=12, radius_y=12, fill="#E8F0FE", stroke="#0F6CBD", stroke_width=2)
+ui.Ellipse(canvas, left=240, top=40, width=140, height=100, fill="#FFF4CE")
+ui.Line(canvas, x1=0, y1=0, x2=200, y2=120, stroke="#C42B1C")
+ui.Polygon(canvas, points=[[680, 70], [720, 30], [760, 70]], fill="#DFF6DD")
+ui.Path(canvas, d="M 40 300 C 140 200, 240 400, 340 300", stroke="#5C2E91", stroke_width=3)
+ui.Label(canvas, "文字也能放", left=60, top=150)
+```
+
+`Path` 的 `d` 支持完整的 SVG 路径命令（`M L H V C S Q T A Z`，小写为相对坐标），
+宿主自己解析，不依赖 XAML。
+
+**视图缩放平移**走 `view`，一条属性生效，开销与图元数量无关：
+
+```python
+canvas.view = {"scale": 1.5, "offsetX": 40, "offsetY": -20}
+```
+
+**单个图元的变换**：
+
+```python
+box.transform = {"rotate": 15, "scaleX": 1.2, "scaleY": 1.2}
+```
+
+**拖动**靠带坐标的指针事件，坐标相对父容器：
+
+```python
+drag = {"dx": 0.0, "dy": 0.0}
+
+def on_press(e):
+    drag["dx"] = e.data["x"] - box.left
+    drag["dy"] = e.data["y"] - box.top
+
+def on_move(e):
+    box.left = e.data["x"] - drag["dx"]
+    box.top = e.data["y"] - drag["dy"]
+
+box.bind("pointerPressed", on_press)
+box.bind("pointerMoved", on_move)      # 绑了 moved，按下会自动捕获指针
+box.bind("pointerReleased", lambda e: None)
+```
+
+**性能边界**：每个图元都是真实 XAML 元素。几百个图元、拖动单个对象完全流畅；
+上千个图元同帧全量改属性会掉到 10 fps 左右。缩放和平移务必用 `view`，
+不要逐个改 `left` / `top`。
+
+完整可运行示例见 `examples/14_canvas.py`。
+
 ---
 
 ## 7. 示例
@@ -744,6 +800,9 @@ panel.animate_width(200, steps=12, interval=16)   # 底层就是一条 micro
   `maximize()` 之后单独 `query()`。
 - **拖放只回报「发生了」**。`drop` 等事件给出 `{accepted}`，不解析 `DataView` 里的文件 /
   文本内容，也没有 `DragStarting`。
+- **画布只覆盖基础几何图元**。支持 `Rect` / `Ellipse` / `Line` / `Path` / `Polygon` /
+  `Polyline`，但没有渐变填充、`pattern`、`filter`、`mask`、`clipPath`；`d` 只解析几何，
+  文本沿路径、`<use>` 引用、SMIL 动画都不支持。
 - **富文本只覆盖 Run 级样式**。`RichTextBlock` 的 `richText` 支持粗体 / 斜体 / 下划线 /
   字号 / 颜色分段，但没有超链接、内联图片、多段落和列表；`RichEditBox` 仍是纯文本。
 - **`RelativePanel` 只有容器能力**。WinUI 的 `AlignLeftWithPanel` / `AlignRightWith` 等附加
