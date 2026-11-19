@@ -312,6 +312,17 @@ internal static class ExtendedProperties
 
                 return false;
 
+            case "zIndex":
+                // 同一 Canvas 内的叠放次序：数值大的盖在上面。
+                // 拖动、选中高亮这类场景必须能把目标临时提到最前。
+                if (ValueParsers.AsInt(v) is { } zIndex)
+                {
+                    Canvas.SetZIndex(e, zIndex);
+                    return true;
+                }
+
+                return false;
+
             case "fill":
                 if (e is Shape fillShape && ValueParsers.AsBrush(v) is { } fillBrush)
                 {

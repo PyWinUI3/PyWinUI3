@@ -90,7 +90,7 @@ ui.Path(
 )
 ui.Label(canvas, "贝塞尔路径", left=40, top=320, font_size=12, foreground="#5C2E91")
 
-# 可拖动的方块
+# 可拖动的方块：z_index 抬高，保证盖在网格线和文字之上
 box = ui.Rect(
     canvas,
     left=700,
@@ -102,6 +102,7 @@ box = ui.Rect(
     fill="#0F6CBD",
     stroke="#0B4F92",
     stroke_width=2,
+    z_index=100,
 )
 
 state_label = ui.Label(root, "拖动方块试试（按住并移动鼠标）", font_size=12)
@@ -111,6 +112,11 @@ state_label = ui.Label(root, "拖动方块试试（按住并移动鼠标）", fo
 # ---------------------------------------------------------------------------
 pos = {"x": 700.0, "y": 260.0}
 drag = {"active": False, "dx": 0.0, "dy": 0.0}
+
+# 拖动范围限制在画布内：画布不裁切，拖出去会被父容器的其他控件盖住，
+# 看起来就像「图元跑到别的控件底下」。
+CANVAS_W, CANVAS_H = 850, 420
+BOX_W, BOX_H = 90, 90
 
 
 def on_press(event) -> None:
@@ -125,8 +131,8 @@ def on_move(event) -> None:
     if not drag["active"]:
         return
     data = event.data
-    pos["x"] = data["x"] - drag["dx"]
-    pos["y"] = data["y"] - drag["dy"]
+    pos["x"] = max(0.0, min(CANVAS_W - BOX_W, data["x"] - drag["dx"]))
+    pos["y"] = max(0.0, min(CANVAS_H - BOX_H, data["y"] - drag["dy"]))
     box.left = pos["x"]
     box.top = pos["y"]
     state_label.text = f"拖动中 ({data['x']:.0f}, {data['y']:.0f}) → left={pos['x']:.0f}, top={pos['y']:.0f}"
