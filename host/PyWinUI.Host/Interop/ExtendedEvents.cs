@@ -456,6 +456,11 @@ internal static class ExtendedEvents
                     ["value"] = (e.InvokedItem as TreeViewNode)?.Content?.ToString() ?? "",
                 });
                 return true;
+            case ToggleSplitButton toggleSplit:
+                // 可切换分体按钮的勾选态：不接这个事件，Python 侧只能自己数点击次数
+                toggleSplit.IsCheckedChanged += (_, _) =>
+                    Change(new JsonObject { ["checked"] = toggleSplit.IsChecked });
+                return true;
             default:
                 return false;
         }

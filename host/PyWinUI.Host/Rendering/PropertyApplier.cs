@@ -625,6 +625,10 @@ internal sealed class PropertyApplier
             case TextBlock block:
                 block.Foreground = brush;
                 break;
+            // 同上：IconElement 不在 Control 分支里
+            case FontIcon icon:
+                icon.Foreground = brush;
+                break;
             default:
                 break;
         }
@@ -671,6 +675,11 @@ internal sealed class PropertyApplier
         {
             case TextBlock block:
                 block.FontSize = size;
+                break;
+            // FontIcon 不是 Control（继承自 IconElement），必须单独放行，
+            // 否则 Icon 节点的 fontSize 全部落空。
+            case FontIcon icon:
+                icon.FontSize = size;
                 break;
             case Control control:
                 control.FontSize = size;

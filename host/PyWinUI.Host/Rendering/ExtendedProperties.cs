@@ -275,6 +275,17 @@ internal static class ExtendedProperties
                 }
 
                 return false;
+            case "underline":
+                // TextBlock 的下划线。富文本片段有独立写法，这里是整块开关。
+                if (e is TextBlock underlineBlock && ValueParsers.AsBool(v) is { } underlineOn)
+                {
+                    underlineBlock.TextDecorations = underlineOn
+                        ? Windows.UI.Text.TextDecorations.Underline
+                        : Windows.UI.Text.TextDecorations.None;
+                    return true;
+                }
+
+                return false;
             case "value":
                 return ApplyExtendedValue(e, v, warn);
             case "items":
