@@ -38,6 +38,18 @@ internal sealed class EventBridge
     /// <summary>窗口级事件单独记一份：它们挂在 Window 上，不挂在根元素上。</summary>
     private readonly HashSet<(string NodeId, string EventName)> _boundWindow = new();
 
+    /// <summary>
+    /// 每个节点上一次发出 pointerMoved 的时间戳（TickCount64）。
+    ///
+    /// 鼠标移动事件能到 120Hz 以上，而一次「改路径 + 重绘」在宿主侧要几毫秒
+    /// （40 段路径实测约 7ms）。全量转发时 125 × 7ms ≈ 875ms/s，UI 线程直接打满。
+    /// 这里按 16ms 节流对齐 60fps 刷新节奏：62 × 7ms ≈ 44%，留出余量给其他绘制。
+    /// 拖动结束的最终位置由 pointerReleased 补上，不受节流影响。
+    /// </summary>
+    private readonly Dictionary<string, long> _lastPointerMoveTick = new();
+
+    private const int PointerMoveThrottleMs = 16;
+
     /// <param name="emit">参数依次为 nodeId、事件名、数据、是否回声。</param>
     /// <param name="resolveId">把子元素反查成节点 id，用于标签关闭这类「事件属于子节点」的场景。</param>
     /// <param name="resolveOwner">按节点 id 取协议层的父元素，用于标签选中这类需要父容器事件的场景。</param>
@@ -465,7 +477,18 @@ internal sealed class EventBridge
 
             // 拖动三件套：只有 pressed 没法做画布拖拽，必须有 moved / released
             case "pointerMoved":
-                element.PointerMoved += (_, e) => raise("pointerMoved", PointerPayload(e, element));
+                element.PointerMoved += (_, e) =>
+                {
+                    var now = Environment.TickCount64;
+                    if (_lastPointerMoveTick.TryGetValue(nodeId, out var last)
+                        && now - last < PointerMoveThrottleMs)
+                    {
+                        return;
+                    }
+
+                    _lastPointerMoveTick[nodeId] = now;
+                    raise("pointerMoved", PointerPayload(e, element));
+                };
                 break;
 
             case "pointerReleased":
