@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pywinui3"
-version = "0.2.1"
+version = "0.2.2"
 description = "Tkinter-style Python UI library backed by a real WinUI 3 renderer"
 readme = { text = "用 tkinter 的写法，渲染真正的 WinUI 3 界面。详见仓库根目录 README.md。", content-type = "text/markdown" }
 requires-python = ">=3.10"

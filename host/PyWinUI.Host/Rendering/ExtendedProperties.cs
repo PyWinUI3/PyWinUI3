@@ -1,8 +1,10 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
+using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.UI;
@@ -262,6 +264,17 @@ internal static class ExtendedProperties
             // 只在这些扩展控件上接管；其他控件返回 false，原有逻辑照常生效。
             case "text":
                 return ApplyExtendedText(e, v, warn);
+            case "richText":
+                return ApplyRichText(e, v, warn);
+            case "glyph":
+                // Icon 节点的字形（Segoe Fluent Icons 码点，如 "\uE8A5"）
+                if (e is FontIcon glyphIcon && ValueParsers.AsString(v) is { } glyphText)
+                {
+                    glyphIcon.Glyph = glyphText;
+                    return true;
+                }
+
+                return false;
             case "value":
                 return ApplyExtendedValue(e, v, warn);
             case "items":
@@ -453,6 +466,85 @@ internal static class ExtendedProperties
     // ------------------------------------------------------------------
     // 与主 switch 同名的 key：只接管扩展控件
     // ------------------------------------------------------------------
+
+    /// <summary>
+    /// 富文本：<c>richText</c> 接受 span 数组，每个元素
+    /// <c>{ text, bold, italic, underline, size, color }</c>，逐段生成带格式的 Run。
+    ///
+    /// 与 <c>text</c> 的关系：<c>text</c> 仍是纯文本快捷写法（整段一个 Run），
+    /// 需要混排格式时用 <c>richText</c>。两者互不干扰，后应用的覆盖先应用的。
+    /// </summary>
+    private static bool ApplyRichText(FrameworkElement e, JsonNode? v, Action<string> warn)
+    {
+        if (v is not JsonArray spans)
+        {
+            warn("richText 需要一个 span 数组");
+            return true;
+        }
+
+        if (e is RichTextBlock rich)
+        {
+            rich.Blocks.Clear();
+            var paragraph = new Paragraph();
+            foreach (var node in spans)
+            {
+                if (node is not JsonObject span)
+                {
+                    // 裸字符串按无格式片段处理，允许 ["普通", {"text":"粗","bold":true}] 混排
+                    if (ValueParsers.AsString(node) is { } bare)
+                    {
+                        paragraph.Inlines.Add(new Run { Text = bare });
+                    }
+
+                    continue;
+                }
+
+                var run = new Run { Text = ValueParsers.AsString(span["text"]) ?? "" };
+                if (ValueParsers.AsBool(span["bold"]) == true)
+                {
+                    run.FontWeight = FontWeights.Bold;
+                }
+
+                if (ValueParsers.AsBool(span["italic"]) == true)
+                {
+                    run.FontStyle = Windows.UI.Text.FontStyle.Italic;
+                }
+
+                if (ValueParsers.AsBool(span["underline"]) == true)
+                {
+                    run.TextDecorations = Windows.UI.Text.TextDecorations.Underline;
+                }
+
+                if (ValueParsers.AsDouble(span["size"]) is { } size && size > 0)
+                {
+                    run.FontSize = size;
+                }
+
+                if (ValueParsers.AsColor(span["color"]) is { } color)
+                {
+                    run.Foreground = new SolidColorBrush(color);
+                }
+
+                paragraph.Inlines.Add(run);
+            }
+
+            rich.Blocks.Add(paragraph);
+            return true;
+        }
+
+        if (e is RichEditBox edit)
+        {
+            // RichEditBox 的富文本要 ITextRange 逐段设 CharacterFormat，
+            // 且与用户编辑的撤销栈交织，容易把撤销弄乱。先按纯文本降级。
+            warn("RichEditBox 暂不支持 richText，已按纯文本处理");
+            var plain = string.Concat(spans.Select(n =>
+                n is JsonObject o ? ValueParsers.AsString(o["text"]) ?? "" : ValueParsers.AsString(n) ?? ""));
+            edit.Document.SetText(Microsoft.UI.Text.TextSetOptions.None, plain);
+            return true;
+        }
+
+        return false;
+    }
 
     private static bool ApplyExtendedText(FrameworkElement e, JsonNode? v, Action<string> warn)
     {

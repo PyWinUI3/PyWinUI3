@@ -42,6 +42,11 @@ internal static class ExtendedControls
             case "RichEditBox":
                 return new RichEditBox();
 
+            case "Icon":
+                // 单独暴露成节点类型：items.children 里放图标是最常见的需求，
+                // 之前只能塞 Label 显示 emoji。字形用 Segoe Fluent Icons 码点。
+                return new FontIcon { FontSize = 16 };
+
             case "AutoSuggestBox":
                 return new AutoSuggestBox();
 

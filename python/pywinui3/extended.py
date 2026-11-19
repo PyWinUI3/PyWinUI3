@@ -125,13 +125,39 @@ class PasswordBox(_TextWidget):
         super().__init__(master, text=text, **kwargs)
 
 
+class Icon(Widget):
+    """图标节点（Segoe Fluent Icons 码点）。
+
+    ::
+
+        ui.Icon(col, glyph="\\uE8A5", font_size=20, foreground="#0F6CBD")
+
+    主要用途是放进 ``items.children`` 给列表项配图标。
+    """
+
+    _type = "Icon"
+
+    def __init__(self, master: Any, glyph: str = "", **kwargs: Any):
+        super().__init__(master, glyph=glyph, **kwargs)
+
+
 class RichTextBlock(_TextWidget):
-    """只读富文本块。当前协议只支持纯文本，富文本 run 见已知限制。"""
+    """只读富文本块。
+
+    两种写法：
+
+    - ``text="纯文本"``：整段无格式
+    - ``rich_text=[{"text": "粗", "bold": True}, ...]``：逐段设置格式，
+      片段字段支持 ``text`` / ``bold`` / ``italic`` / ``underline`` /
+      ``size`` / ``color``
+    """
 
     _type = "RichTextBlock"
 
     def __init__(self, master: Any, text: str = "", **kwargs: Any):
-        super().__init__(master, text=text, wrap=True, **kwargs)
+        # 默认换行，但允许调用方覆盖（之前硬编码会导致 wrap= 重复传参报错）
+        kwargs.setdefault("wrap", True)
+        super().__init__(master, text=text, **kwargs)
 
 
 class RichEditBox(_TextWidget):
@@ -580,6 +606,7 @@ class RefreshContainer(Widget):
 __all__ = [
     "NumberBox",
     "PasswordBox",
+    "Icon",
     "RichTextBlock",
     "RichEditBox",
     "AutoSuggestBox",

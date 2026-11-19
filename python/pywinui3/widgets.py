@@ -976,6 +976,9 @@ class ListBox(Widget):
         ], width=200, auto_collapse=True, collapsed_width=40)
 
         body.bind("pointerPressed", lambda e: nav.release())
+
+    ``items`` 支持三种写法，可混排：纯字符串、``{"text", "glyph"}`` 富项、
+    ``{"children": [...]}`` 子控件条目（后者能把任意叶控件放进列表项）。
     """
 
     _type = "ListBox"
@@ -983,7 +986,7 @@ class ListBox(Widget):
     def __init__(
         self,
         master: Any,
-        items: list[str] | None = None,
+        items: list[str | dict[str, Any]] | None = None,
         *,
         auto_collapse: bool = False,
         collapsed_width: int = 40,

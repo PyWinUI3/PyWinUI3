@@ -94,7 +94,7 @@ Python                          Host
 #### `hello` — 握手
 
 ```json
-{ "op": "hello", "protocol": 1, "client": "pywinui3/0.2.1", "pid": 12345 }
+{ "op": "hello", "protocol": 1, "client": "pywinui3/0.2.2", "pid": 12345 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -323,7 +323,7 @@ Python 侧 `App.query()` 是阻塞式的：等到配对结果才返回，等待�
 {
   "t": "ready",
   "protocol": 1,
-  "host": "PyWinUI.Host/0.2.1",
+  "host": "PyWinUI.Host/0.2.2",
   "os": { "version": "10.0.19044", "build": 19044 },
   "capabilities": {
     "mica": false,
@@ -509,8 +509,9 @@ Win32 子类化拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
 |---|---|---|
 | `NumberBox` | `NumberBox` | 否 |
 | `PasswordBox` | `PasswordBox` | 否 |
-| `RichTextBlock` | `RichTextBlock`（当前只放纯文本段落） | 否 |
+| `RichTextBlock` | `RichTextBlock`（`text` 纯文本 / `richText` 分段格式） | 否 |
 | `RichEditBox` | `RichEditBox` | 否 |
+| `Icon` | `FontIcon`（`glyph` + 通用 `fontSize` / `foreground`） | 否 |
 | `AutoSuggestBox` | `AutoSuggestBox` | 否 |
 | `DatePicker` | `DatePicker` | 否 |
 | `TimePicker` | `TimePicker` | 否 |
@@ -546,6 +547,33 @@ Win32 子类化拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
 `BorderBox` 单独命名，是为了不和 `Separator` 复用的 `Border` 混淆。这些容器创建时都预置
 一层内层 `StackPanel`，所以子节点挂载规则与 `Column` / `Scroll` 完全一致，渲染器不需要为
 它们开特例分支。
+
+#### 富文本：`richText`
+
+`RichTextBlock` 除了 `text` 纯文本，还接受 `richText` 数组做分段格式：
+
+```json
+"richText": [
+  { "text": "警告：", "bold": true, "color": "#C42B1C" },
+  { "text": "剩余空间不足", "italic": true },
+  { "text": "2.1 GB", "bold": true, "underline": true, "size": 18 }
+]
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `text` | 是 | 片段文字 |
+| `bold` / `italic` / `underline` | 否 | 字形开关 |
+| `size` | 否 | 字号（DIP），不填沿用控件字号 |
+| `color` | 否 | 颜色，格式同 `foreground` |
+
+数组里也可以混入裸字符串，按无格式片段处理。所有片段渲染进同一个 `Paragraph`。
+
+`text` 与 `richText` 同时出现时，后应用的覆盖先应用的——协议里保持 `text` 在前、
+`richText` 在后的书写顺序即可。
+
+> `RichEditBox` 暂不支持 `richText`：它的富文本要经 `ITextRange` 逐段设置
+> `CharacterFormat`，与用户的撤销栈交织容易出问题，当前按纯文本降级并打一条告警。
 
 #### 标签页：`PinnedTab` 与 `TabPage`
 
@@ -687,7 +715,7 @@ Win32 子类化拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
 `TreeView` 的 `items` 支持嵌套：
 `{"label": "父节点", "children": ["子1", {"label": "子2", "children": [...]}]}`。
 
-#### 3.5.1 `items` 的两种形态
+#### 3.5.1 `items` 的三种形态
 
 纯文本：
 
@@ -720,6 +748,37 @@ Icons 字体，不需要额外资源文件。常用码点：
 | `\uE896` | 下载 | `\uE72D` | 分享 |
 
 完整列表见微软文档 "Segoe Fluent Icons font"。
+
+带子控件（数组元素写 `children`，每个子元素是一个节点描述）：
+
+```json
+"items": [
+  {
+    "children": [
+      { "type": "Icon", "props": { "glyph": "\uE8A5" } },
+      { "type": "Label", "props": { "text": "年度报告.pdf", "width": 180 } },
+      { "type": "Label", "props": { "text": "2.4 MB", "opacity": 0.6 } }
+    ]
+  },
+  "纯文字项可以和它混排"
+]
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `children` | 是 | 节点描述数组，每项 `{ "type": ..., "props": {...} }`，与 render 里的节点同格式 |
+
+子元素由宿主建好并注册进节点表，id 形如 `{列表id}#{条目序号}.{子控件序号}`，
+**因此可以正常绑事件**（`click` 等照常回传）。
+
+布局规则：只有一个子控件时直接作为条目；多个则包一层横向 `StackPanel`（间距 8）排开。
+需要纵向或更复杂的内部结构时，把内容拆成多个叶子控件自行控制宽度，或改用
+`TabPage` 之类真正的容器。
+
+限制：`children` 里的元素**只创建自身**，不递归处理它 `props` 里的 `children`——
+嵌套容器请用常规的子节点层级，而不是塞进列表项。
+
+列表重新赋值时，上一轮创建的子节点会从节点表移除，反复刷新不会累积。
 
 #### 3.5.2 `contextMenu` 与 `menu` 的菜单项
 
@@ -1040,8 +1099,8 @@ win.mainloop()
 对应线上流量：
 
 ```
-→ {"op":"hello","protocol":1,"client":"pywinui3/0.2.1","pid":8123}
-← {"t":"ready","protocol":1,"host":"PyWinUI.Host/0.2.1","os":{"version":"10.0.19044","build":19044},"capabilities":{"mica":false,"acrylic":true,"roundedCorners":false,"backdrop":"acrylic"}}
+→ {"op":"hello","protocol":1,"client":"pywinui3/0.2.2","pid":8123}
+← {"t":"ready","protocol":1,"host":"PyWinUI.Host/0.2.2","os":{"version":"10.0.19044","build":19044},"capabilities":{"mica":false,"acrylic":true,"roundedCorners":false,"backdrop":"acrylic"}}
 → {"op":"render","rev":1,"window":{"title":"Demo","width":640,"height":480,"backdrop":"auto"},"root":"n0","nodes":[{"id":"n0","type":"Column","props":{"padding":24,"spacing":12},"children":["n1","n2"]},{"id":"n1","type":"Label","props":{"text":"你好","fontSize":28}},{"id":"n2","type":"Button","props":{"text":"点我"},"events":{"click":"h1"}}]}
 ← {"t":"ack","rev":1}
 ← {"t":"event","id":"n2","event":"click","rev":1,"data":{}}

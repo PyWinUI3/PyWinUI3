@@ -41,10 +41,30 @@ internal sealed class PropertyApplier
     /// </summary>
     private string? _nodeId;
 
-    public PropertyApplier(Action<string> warn, Action<string, string, JsonObject?, bool> emit)
+    /// <summary>
+    /// 创建列表项内部子控件。参数：(父节点 id, 条目序号, 子控件序号, 节点描述)。
+    /// 由 FormRenderer 注入——它才有节点表，子控件必须注册进去，
+    /// 否则事件回传时按元素反查不到 id。
+    /// 为 null 表示宿主不支持（纯单元测试里可直接省略）。
+    /// </summary>
+    private readonly Func<string, int, int, JsonObject, FrameworkElement?>? _createItemChild;
+
+    /// <summary>
+    /// 重建某个列表的 items 之前，清掉上一轮在该列表里创建的子节点。
+    /// 不清理的话旧元素会一直挂在节点表里，列表反复刷新就是稳定的内存泄漏。
+    /// </summary>
+    private readonly Action<string>? _resetItemChildren;
+
+    public PropertyApplier(
+        Action<string> warn,
+        Action<string, string, JsonObject?, bool> emit,
+        Func<string, int, int, JsonObject, FrameworkElement?>? createItemChild = null,
+        Action<string>? resetItemChildren = null)
     {
         _warn = warn;
         _emit = emit;
+        _createItemChild = createItemChild;
+        _resetItemChildren = resetItemChildren;
     }
 
     public void Apply(string? nodeId, FrameworkElement element, JsonObject? props)
@@ -1230,6 +1250,9 @@ internal sealed class PropertyApplier
         // 好让同一份列表里「纯文字项」和「带图标项」可以混排
         var hasRich = array.Any(node => node is JsonObject);
 
+        // 换 ItemsSource 会丢弃旧列表项，它们对应的子节点要一并从节点表摘掉
+        _resetItemChildren?.Invoke(_nodeId ?? "");
+
         object source = hasRich ? BuildRichItems(array) : BuildPlainItems(array);
 
         switch (element)
@@ -1263,13 +1286,21 @@ internal sealed class PropertyApplier
         return list;
     }
 
-    private static List<FrameworkElement> BuildRichItems(JsonArray array)
+    private List<FrameworkElement> BuildRichItems(JsonArray array)
     {
         var list = new List<FrameworkElement>(array.Count);
-        foreach (var node in array)
+        for (var index = 0; index < array.Count; index++)
         {
+            var node = array[index];
             if (node is JsonObject obj)
             {
+                // 子控件模式：条目内容是任意节点树，不再局限于「图标 + 文字」
+                if (obj["children"] is JsonArray children && children.Count > 0)
+                {
+                    list.Add(BuildItemWithChildren(index, children));
+                    continue;
+                }
+
                 list.Add(BuildRichItem(
                     ValueParsers.AsString(obj["text"]) ?? string.Empty,
                     ValueParsers.AsString(obj["glyph"])));
@@ -1282,6 +1313,56 @@ internal sealed class PropertyApplier
         }
 
         return list;
+    }
+
+    /// <summary>
+    /// 用 children 数组描述一个列表项的内部布局。
+    ///
+    /// 单个子控件直接用；多个则包一层横向 StackPanel 并留 8px 间距
+    /// （想要纵向排布就在 children 里放一个 Column 节点，本层不替用户决定方向）。
+    /// </summary>
+    private FrameworkElement BuildItemWithChildren(int index, JsonArray children)
+    {
+        if (_createItemChild is null)
+        {
+            _warn("当前宿主不支持 items.children（缺少节点注册回调）");
+            return new TextBlock { Text = string.Empty };
+        }
+
+        var built = new List<FrameworkElement>(children.Count);
+        for (var childIndex = 0; childIndex < children.Count; childIndex++)
+        {
+            if (children[childIndex] is not JsonObject spec)
+            {
+                _warn($"items[{index}].children[{childIndex}] 不是对象，已跳过");
+                continue;
+            }
+
+            var element = _createItemChild(_nodeId ?? "", index, childIndex, spec);
+            if (element is not null)
+            {
+                built.Add(element);
+            }
+        }
+
+        if (built.Count == 1)
+        {
+            return built[0];
+        }
+
+        var panel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        foreach (var element in built)
+        {
+            panel.Children.Add(element);
+        }
+
+        return panel;
     }
 
     /// <summary>

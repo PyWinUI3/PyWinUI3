@@ -46,11 +46,81 @@ internal sealed class FormRenderer
         _warn = warn;
         _error = error;
         _emit = emit;
-        _applier = new PropertyApplier(warn, emit);
+        _applier = new PropertyApplier(warn, emit, CreateItemChild, ResetItemChildren);
         _bridge = new EventBridge(emit, warn, TryGetNodeId, OwnerOrNull);
     }
 
     public int NodeCount => _nodes.Count;
+
+    /// <summary>
+    /// 每个列表（按父节点 id）在上一轮 items 里创建过的子节点 id。
+    /// 列表刷新时据此把旧子节点从节点表摘掉，避免只增不减。
+    /// </summary>
+    private readonly Dictionary<string, List<string>> _itemChildIds = new();
+
+    /// <summary>
+    /// 为 <c>items[].children</c> 创建子控件并注册到节点表。
+    ///
+    /// id 形如 <c>{列表id}#{条目序号}.{子控件序号}</c>：稳定、可预测，
+    /// 事件回传时能按元素反查到它。props 里缺省时给空对象，
+    /// 让 NodeFactory 走默认值而不是拿到 null。
+    /// </summary>
+    private FrameworkElement? CreateItemChild(string parentId, int itemIndex, int childIndex, JsonObject spec)
+    {
+        var type = ValueParsers.AsString(spec["type"]);
+        if (string.IsNullOrWhiteSpace(type))
+        {
+            _warn($"items[{itemIndex}].children[{childIndex}] 缺少 type");
+            return null;
+        }
+
+        if (string.IsNullOrEmpty(parentId))
+        {
+            _warn("items.children 无法定位父节点 id，已跳过");
+            return null;
+        }
+
+        var id = $"{parentId}#{itemIndex}.{childIndex}";
+        var props = spec["props"] as JsonObject ?? new JsonObject();
+
+        FrameworkElement element;
+        try
+        {
+            element = NodeFactory.Create(type, id, props, _warn);
+        }
+        catch (Exception ex)
+        {
+            _warn($"items.children 创建 {type} 失败: {ex.Message}");
+            return null;
+        }
+
+        _nodes[id] = element;
+
+        if (!_itemChildIds.TryGetValue(parentId, out var ids))
+        {
+            ids = new List<string>();
+            _itemChildIds[parentId] = ids;
+        }
+
+        ids.Add(id);
+        return element;
+    }
+
+    /// <summary>列表重建前，把上一轮该列表创建的子节点从节点表移除。</summary>
+    private void ResetItemChildren(string parentId)
+    {
+        if (string.IsNullOrEmpty(parentId) || !_itemChildIds.Remove(parentId, out var ids))
+        {
+            return;
+        }
+
+        foreach (var id in ids)
+        {
+            _nodes.Remove(id);
+            _specs.Remove(id);
+            _parentOf.Remove(id);
+        }
+    }
 
     /// <summary>某个节点是否真的订阅了某个事件（select_tab 用它避免重复回事件）。</summary>
     public bool IsEventBound(string nodeId, string eventName) =>

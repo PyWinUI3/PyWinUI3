@@ -11,7 +11,7 @@ JSON Lines。`mainloop()` 的语义与 tkinter 一致；宿主崩溃不会带走
 | **Python** | 3.10+，仅标准库，零第三方依赖 |
 | **协议** | [docs/protocol.md](docs/protocol.md) 是唯一权威定义 |
 | **能力** | 58 种控件、query/result 同步读回、micro 微代码、键盘/焦点/拖放/窗口状态事件 |
-| **版本 / 许可** | 0.2.1 · GPL-3.0-only |
+| **版本 / 许可** | 0.2.2 · GPL-3.0-only |
 
 ```python
 import pywinui3 as ui
@@ -744,13 +744,14 @@ panel.animate_width(200, steps=12, interval=16)   # 底层就是一条 micro
   `maximize()` 之后单独 `query()`。
 - **拖放只回报「发生了」**。`drop` 等事件给出 `{accepted}`，不解析 `DataView` 里的文件 /
   文本内容，也没有 `DragStarting`。
-- **富文本目前是纯文本**。`RichTextBlock` / `RichEditBox` 只读写一段纯文字，没有 `Block` /
-  `Run` 的样式、超链接、图片内联接口。
+- **富文本只覆盖 Run 级样式**。`RichTextBlock` 的 `richText` 支持粗体 / 斜体 / 下划线 /
+  字号 / 颜色分段，但没有超链接、内联图片、多段落和列表；`RichEditBox` 仍是纯文本。
 - **`RelativePanel` 只有容器能力**。WinUI 的 `AlignLeftWithPanel` / `AlignRightWith` 等附加
   属性未映射到协议，子节点目前按默认位置叠放；需要精确布局请用 `Grid`。
-- **动态条目不能塞子控件**。`TreeView` / `MenuBar` / `CommandBar` / `TabView` / `ItemsView` /
-  `BreadcrumbBar` 的条目由宿主按字符串生成，点击靠 `e.data["index"]` / `value` 区分，不能
-  在条目里放自定义 UI。（`TabPage` / `PinnedTab` 是例外，见 [6.6](#66-标签页)。）
+- **动态条目的子控件只在 `ListBox` / `ComboBox` 支持**。这两者的 `items` 元素可以写
+  `children` 放叶控件（见 [3.5.1](docs/protocol.md#351-items-的三种形态)）；`TreeView` /
+  `MenuBar` / `CommandBar` / `TabView` / `ItemsView` / `BreadcrumbBar` 的条目仍由宿主按字符串
+  生成。（`TabPage` / `PinnedTab` 是例外，见 [6.6](#66-标签页)。）
 - **`CalendarView` 多选只读第一个日期**，`selectedDatesChanged` 回报单值；`ItemsView` 用默认
   模板显示字符串，复杂 ItemTemplate 未开放。
 - **没有 `DataGrid` 和 `InkCanvas`**。WinUI 3 不内置这两个控件；前者可用 `GridView` /

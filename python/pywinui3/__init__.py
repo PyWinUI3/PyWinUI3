@@ -53,6 +53,7 @@ from .extended import (
     RefreshContainer,
     RelativePanel,
     RichEditBox,
+    Icon,
     RichTextBlock,
     SelectorBar,
     TabView,
@@ -91,7 +92,7 @@ from .widgets import (
 )
 from .window import Window
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 
 def dialog(title: str, message: str, kind: str = "info") -> None:
@@ -170,6 +171,7 @@ __all__ = [
     # 扩展控件：表单输入
     "NumberBox",
     "PasswordBox",
+    "Icon",
     "RichTextBlock",
     "RichEditBox",
     "AutoSuggestBox",

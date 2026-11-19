@@ -50,7 +50,8 @@ class TestExtendedExports(unittest.TestCase):
             self.assertTrue(hasattr(ui, name), f"{name} 没有从包顶层导出")
 
     def test_extended_count(self):
-        self.assertEqual(len(EXTENDED_NAMES), 35)
+        # 0.2.2 起新增 Icon 节点（供 items.children 配图标），35 → 36
+        self.assertEqual(len(EXTENDED_NAMES), 36)
 
     def test_no_duplicate_exports(self):
         self.assertEqual(len(ui.__all__), len(set(ui.__all__)))
