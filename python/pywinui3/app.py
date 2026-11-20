@@ -36,6 +36,34 @@ DEFAULT_TIMEOUT = 10.0
 #: 事件循环的单次轮询间隔。足够跟上 60fps，又不会空转烧 CPU。
 POLL_INTERVAL = 0.05
 
+
+def _raise_timer_resolution() -> bool:
+    """把 Windows 定时器精度提到 1ms，返回是否真的改了。
+
+    系统默认精度约 15.6ms，``after(16)`` 实际会落到 ~31ms，
+    表现就是动画卡在半个帧率上（实测 31fps，提升后 52fps）。
+    改的是进程级设置，退出时要还原。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        return ctypes.windll.winmm.timeBeginPeriod(1) == 0
+    except Exception:
+        return False
+
+
+def _restore_timer_resolution(active: bool) -> None:
+    if not active:
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.winmm.timeEndPeriod(1)
+    except Exception:
+        pass
+
 #: 同一帧内的多次属性赋值合并成一条 patch 的时间窗（毫秒）。
 #: 见 PLAN「决策三」；不合并的话拖动 Slider 或跑实时 UI 会把管道刷爆。
 MERGE_WINDOW_MS = 16
@@ -211,10 +239,13 @@ class App:
         """启动宿主、渲染窗口、进入事件循环。阻塞直到窗口关闭。"""
         self._graceful = False
         self.start()
+        # 动画/拖动依赖 after() 的精度，默认 15.6ms 会让 16ms 间隔落成 31ms
+        high_resolution = _raise_timer_resolution()
         try:
             self._render()
             self._loop()
         finally:
+            _restore_timer_resolution(high_resolution)
             self._shutdown()
 
     def _loop(self) -> None:

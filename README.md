@@ -662,6 +662,10 @@ tabs.bind("tabCloseRequested", lambda e: print("关了", e.data["value"]))
   读回看到最新状态。结构类 `insert` / `remove` / `move` 不参与合并，也不跨越它们合并。
 - **几何读取节流**。`actualWidth` / `actualHeight` / `bounds` 的 `UpdateLayout()` 在 16 ms
   内最多跑一次，连读多个几何值不再重复全量布局。
+- **`pointerMoved` 按 16 ms 节流**。鼠标移动能到 120Hz 以上，而一次「改路径 + 重绘」在宿主
+  侧要几毫秒，全量转发会把 UI 线程打满。节流对齐 60fps，松手位置由 `pointerReleased` 补上。
+- **定时器精度提到 1 ms**。Windows 默认约 15.6 ms，`after(16)` 实际会落到 ~31 ms，
+  动画只有半帧率。进入 `mainloop` 时调 `timeBeginPeriod(1)`，退出时还原。
 - **日志默认零磁盘 IO**。`HostLog.Write` 只记异常 / 生命周期 / 告警，使用长驻
   StreamWriter；逐条报文 `<<` / `>>` 走 `HostLog.Trace`，默认不落盘，设
   `PYWINUI3_TRACE=1` 才写 `%TEMP%/pywinui3-host-<pid>.log`（按进程分开）。
@@ -756,6 +760,44 @@ box.bind("pointerReleased", lambda e: None)
 不要逐个改 `left` / `top`。
 
 完整可运行示例见 `examples/14_canvas.py`。
+
+### 6.9 Win2D 画布（大量图元）
+
+`Canvas2D` 把图元数组一次性交给 GPU 绘制，适合"几千个图元、只读或整体刷新"的场景：
+
+```python
+canvas = ui.Canvas2D(win, width=860, height=520, shapes=[
+    {"type": "line", "x1": 0, "y1": 0, "x2": 200, "y2": 120, "stroke": "#4FC3F7"},
+    {"type": "rect", "x": 240, "y": 40, "w": 120, "h": 80, "radius": 8, "fill": "#DFF6DD"},
+    {"type": "ellipse", "cx": 500, "cy": 90, "rx": 50, "ry": 40, "fill": "#FFF4CE"},
+    {"type": "path", "d": "M 0 200 C 80 120, 160 280, 240 200", "stroke": "#C42B1C"},
+    {"type": "text", "x": 20, "y": 300, "text": "Win2D", "size": 18, "color": "#0F6CBD"},
+])
+```
+
+图元带 `id` 时可以增量更新，**只发变化的字段**：
+
+```python
+canvas.shapes = [{"id": "p1", "type": "ellipse", "cx": 10, "cy": 10, "rx": 3, "ry": 3}]
+canvas.update_shapes([{"id": "p1", "cx": 40, "cy": 60}])   # 只改位置
+```
+
+`update_shapes` 走 invoke 通道，不参与 16ms 属性合并，同一帧多次调用不会丢更新。
+
+**与 `Canvas` 的分工**
+
+| | `Canvas`（XAML） | `Canvas2D`（Win2D） |
+|---|---|---|
+| 每图元一个 UIElement | 是 | 否 |
+| 单独绑事件 / 点选 | 能 | 不能（要自己算命中） |
+| 改单个图元 | 一条 patch，约 7ms | 增量更新，约 2ms |
+| 几千图元静态渲染 | 掉帧 | 流畅 |
+| 适用 | 交互编辑 | 大量只读渲染 |
+
+依赖已内嵌：`Microsoft.Graphics.Win2D` 的两个 DLL 随构建进输出目录，
+目标机器不需要额外安装。实测 800 个动态图元约 52fps（Python 每帧生成约 2ms）。
+
+完整示例见 `examples/15_win2d.py`。
 
 ---
 

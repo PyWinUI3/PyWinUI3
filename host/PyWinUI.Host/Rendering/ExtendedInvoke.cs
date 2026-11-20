@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Microsoft.Graphics.Canvas.UI.Xaml;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -26,6 +27,14 @@ internal static class ExtendedInvoke
 
         switch (method)
         {
+            // ---------------- Win2D 画布 ----------------
+            case "update_shapes":
+                if (element is CanvasControl canvas2d && args?["updates"] is JsonArray shapeUpdates)
+                {
+                    Canvas2DSupport.UpdateShapes(canvas2d, shapeUpdates);
+                }
+                return true;
+
             // ---------------- 文本选区 ----------------
             case "select_range":
                 if (element is TextBox rangeBox)

@@ -28,6 +28,9 @@ internal static class Canvas2DSupport
     private sealed class Holder
     {
         public JsonArray? Shapes;
+
+        /// <summary>id → 数组下标。全量设置时置空，第一次增量更新时惰性构建。</summary>
+        public Dictionary<string, int>? Index;
     }
 
     private static readonly ConditionalWeakTable<CanvasControl, Holder> Store = new();
@@ -45,8 +48,86 @@ internal static class Canvas2DSupport
 
     public static void SetShapes(CanvasControl control, JsonArray shapes)
     {
-        Store.AddOrUpdate(control, new Holder { Shapes = shapes });
+        Store.AddOrUpdate(control, new Holder { Shapes = shapes, Index = null });
         control.Invalidate();
+    }
+
+    /// <summary>
+    /// 按 id 增量更新图元：只覆盖传进来的字段，其余保持不变。
+    ///
+    /// 走 invoke 而不是属性：属性会被 16ms 合并窗口按节点合并，
+    /// 同一帧内多次增量会被压成最后一次，前面的更新直接丢掉。
+    ///
+    /// 全量重发 N 个图元 vs 增量只发变化的几个，差距在图元多时是几十倍。
+    /// </summary>
+    public static void UpdateShapes(CanvasControl control, JsonArray updates)
+    {
+        if (!Store.TryGetValue(control, out var holder) || holder.Shapes is null)
+        {
+            return;
+        }
+
+        holder.Index ??= BuildIndex(holder.Shapes);
+
+        var changed = false;
+
+        foreach (var item in updates)
+        {
+            if (item is not JsonObject patch)
+            {
+                continue;
+            }
+
+            var id = ValueParsers.AsString(patch["id"]);
+            if (string.IsNullOrEmpty(id))
+            {
+                continue;
+            }
+
+            if (!holder.Index.TryGetValue(id, out var slot))
+            {
+                continue;
+            }
+
+            if (holder.Shapes[slot] is not JsonObject shape)
+            {
+                continue;
+            }
+
+            // JsonNode 只能有一个父节点，必须深拷贝才能挂到目标对象下
+            foreach (var pair in patch)
+            {
+                if (pair.Key == "id")
+                {
+                    continue;
+                }
+
+                shape[pair.Key] = pair.Value?.DeepClone();
+            }
+
+            changed = true;
+        }
+
+        if (changed)
+        {
+            control.Invalidate();
+        }
+    }
+
+    private static Dictionary<string, int> BuildIndex(JsonArray shapes)
+    {
+        var index = new Dictionary<string, int>(shapes.Count);
+
+        for (var i = 0; i < shapes.Count; i++)
+        {
+            if (shapes[i] is JsonObject obj
+                && ValueParsers.AsString(obj["id"]) is { Length: > 0 } id)
+            {
+                index[id] = i;
+            }
+        }
+
+        return index;
     }
 
     private static void OnDraw(CanvasControl sender, CanvasDrawEventArgs args)

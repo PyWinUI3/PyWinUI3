@@ -69,7 +69,23 @@ particles = [
     for _ in range(COUNT)
 ]
 
-fg_canvas = ui.Canvas2D(stage, left=0, top=0, width=W, height=H, shapes=[], z_index=10)
+# 前景层：800 个绕圈运动的小点。图元带 id，每帧只发变化的 cx / cy
+fg_shapes = [
+    {
+        "id": f"p{i}",
+        "type": "ellipse",
+        "cx": W / 2,
+        "cy": H / 2,
+        "rx": 2.6,
+        "ry": 2.6,
+        "fill": "#4FC3F7",
+    }
+    for i in range(COUNT)
+]
+
+fg_canvas = ui.Canvas2D(
+    stage, left=0, top=0, width=W, height=H, shapes=fg_shapes, z_index=10
+)
 
 # 帧率与耗时统计
 stats = {"frames": 0, "window_start": time.perf_counter(), "gen_ms": 0.0, "t": 0.0}
@@ -89,23 +105,15 @@ def tick() -> None:
 
     frame_start = time.perf_counter()
 
-    shapes = []
-    for p in particles:
+    # 每帧只发变化的 cx / cy，而不是整个图元数组
+    updates = []
+    for i, p in enumerate(particles):
         angle = angle_base * p["speed"] + p["phase"]
         x = cx + math.cos(angle) * p["radius"]
         y = cy + math.sin(angle) * p["radius"] * 0.62
-        shapes.append(
-            {
-                "type": "ellipse",
-                "cx": x,
-                "cy": y,
-                "rx": 2.6,
-                "ry": 2.6,
-                "fill": "#4FC3F7",
-            }
-        )
+        updates.append({"id": f"p{i}", "cx": x, "cy": y})
 
-    fg_canvas.shapes = shapes
+    fg_canvas.update_shapes(updates)
     stats["gen_ms"] = (time.perf_counter() - frame_start) * 1000
 
     stats["frames"] += 1
@@ -115,7 +123,7 @@ def tick() -> None:
         status.text = (
             f"背景 5000 条线（一次 {gen_ms:.0f} ms）｜"
             f"前景 {COUNT} 点 @ {fps:.0f} fps｜"
-            f"Python 每帧生成 {stats['gen_ms']:.1f} ms"
+            f"Python 每帧生成 {stats['gen_ms']:.1f} ms（增量更新）"
         )
         print(
             f"[win2d] {fps:5.1f} fps  每帧生成 {stats['gen_ms']:.2f} ms  "

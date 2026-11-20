@@ -728,6 +728,22 @@ class Canvas2D(Widget):
             kwargs["shapes"] = shapes
         super().__init__(master, **kwargs)
 
+    def update_shapes(self, updates: list[dict[str, Any]]) -> None:
+        """按 ``id`` 增量更新图元，只发变化的字段。
+
+        图元在 ``shapes`` 里必须带 ``id``::
+
+            canvas.shapes = [{"id": "p1", "type": "ellipse", "cx": 10, "cy": 10, "rx": 3, "ry": 3}]
+            canvas.update_shapes([{"id": "p1", "cx": 20, "cy": 30}])  # 只改位置
+
+        走 invoke 通道即时生效，不参与 16ms 属性合并——同一帧多次调用不会丢更新。
+        全量重发 N 个图元与只发变化的几个，差距在图元多时是几十倍。
+        """
+        if not updates:
+            return
+
+        self._app._send_invoke(self._id, "update_shapes", {"updates": updates})
+
 
 __all__ = [
     "NumberBox",

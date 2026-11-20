@@ -677,6 +677,57 @@ Win32 子类化拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
 同一个节点同时绑了 `pointerPressed` 和 `pointerMoved` 时，按下会自动捕获指针，
 鼠标移出图元也会继续收到 `pointerMoved`，松开时自动释放。这是拖动手势的前提。
 
+`pointerMoved` 在宿主侧按 16 ms 节流（对齐 60fps），避免事件洪泛打满 UI 线程；
+拖动结束位置由 `pointerReleased` 补上，不受节流影响。
+
+#### Win2D 画布：`Canvas2D`
+
+`Canvas2D` 把整块图元数组交给 GPU 绘制，与 `Canvas` 是两条不同的路线：
+
+- `Canvas` 的每个图元是独立 XAML 元素，能单独绑事件、单独改属性
+- `Canvas2D` 的图元只是数据，命中测试要自己在 Python 侧算
+
+```json
+{
+  "id": "n20",
+  "type": "Canvas2D",
+  "props": {
+    "width": 860,
+    "height": 520,
+    "shapes": [
+      { "id": "p1", "type": "line", "x1": 0, "y1": 0, "x2": 200, "y2": 120, "stroke": "#4FC3F7" },
+      { "id": "p2", "type": "rect", "x": 240, "y": 40, "w": 120, "h": 80, "radius": 8, "fill": "#DFF6DD" }
+    ]
+  }
+}
+```
+
+**图元类型**
+
+| `type` | 字段 |
+|---|---|
+| `line` | `x1` `y1` `x2` `y2` |
+| `rect` | `x` `y` `w` `h` `radius`（圆角，可选） |
+| `ellipse` | `cx` `cy` `rx` `ry` |
+| `path` | `d`（语法同 `Path`） |
+| `text` | `x` `y` `text` `size` `color` |
+
+所有图元都支持 `fill` / `stroke` / `strokeWidth`；`text` 用 `color`。
+`id` 可选，但要支持增量更新就必须给。
+
+**全量替换**：给 `shapes` 赋新数组，整块重绘。
+
+**增量更新**（`invoke`，不是属性）：
+
+```json
+{ "op": "invoke", "id": "n20", "method": "update_shapes",
+  "args": { "updates": [ { "id": "p1", "cx": 40, "cy": 60 } ] } }
+```
+
+只覆盖传进来的字段，其余保持不变；按 `id` 定位，找不到的条目静默跳过。
+走 invoke 而非属性，是为了绕开 16ms 的属性合并窗口——
+否则同一帧内的多次增量会被压成最后一次，前面的更新丢失。
+
 #### 标签页：`PinnedTab` 与 `TabPage`
 
 两者都是 `TabView` 的专用子节点，控件总数因此从 56 增至 58：
