@@ -270,6 +270,45 @@ internal static class Canvas2DSupport
                     break;
                 }
 
+                // 任意多边形：3D 软件投影出来的面片就是它，比拼 path 字符串省得多
+                case "polygon":
+                {
+                    if (shape["points"] is not JsonArray pointArray || pointArray.Count < 3)
+                    {
+                        break;
+                    }
+
+                    var vertices = new List<System.Numerics.Vector2>(pointArray.Count);
+                    foreach (var item in pointArray)
+                    {
+                        if (item is JsonArray pair && pair.Count >= 2)
+                        {
+                            vertices.Add(new System.Numerics.Vector2(
+                                (float)(ValueParsers.AsDouble(pair[0]) ?? 0),
+                                (float)(ValueParsers.AsDouble(pair[1]) ?? 0)));
+                        }
+                    }
+
+                    if (vertices.Count < 3)
+                    {
+                        break;
+                    }
+
+                    using var polygon = CanvasGeometry.CreatePolygon(sender, vertices.ToArray());
+
+                    if (fill is { } polygonFill)
+                    {
+                        session.FillGeometry(polygon, polygonFill);
+                    }
+
+                    if (stroke is { } polygonStroke)
+                    {
+                        session.DrawGeometry(polygon, polygonStroke, strokeWidth);
+                    }
+
+                    break;
+                }
+
                 case "text":
                 {
                     var text = ValueParsers.AsString(shape["text"]) ?? "";

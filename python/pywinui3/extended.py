@@ -715,6 +715,7 @@ class Canvas2D(Widget):
         {"type": "rect",    "x", "y", "w", "h", "radius", "fill", "stroke", "strokeWidth"}
         {"type": "ellipse", "cx", "cy", "rx", "ry", "fill", "stroke", "strokeWidth"}
         {"type": "path",    "d", "fill", "stroke", "strokeWidth"}
+        {"type": "polygon", "points", "fill", "stroke", "strokeWidth"}
         {"type": "text",    "x", "y", "text", "size", "color"}
 
     ``d`` 与 :class:`Path` 用同一套 SVG 路径语法。

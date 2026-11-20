@@ -710,6 +710,7 @@ Win32 子类化拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
 | `rect` | `x` `y` `w` `h` `radius`（圆角，可选） |
 | `ellipse` | `cx` `cy` `rx` `ry` |
 | `path` | `d`（语法同 `Path`） |
+| `polygon` | `points`（`[[x, y], ...]`，至少 3 点，自动闭合） |
 | `text` | `x` `y` `text` `size` `color` |
 
 所有图元都支持 `fill` / `stroke` / `strokeWidth`；`text` 用 `color`。
