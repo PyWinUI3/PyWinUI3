@@ -57,10 +57,10 @@ win.mainloop()
 **从 release 安装**（推荐；仅 Windows，需要 Python 3.10+）：
 
 ```powershell
-pip install https://github.com/SystenGames/PyWinUI3/releases/download/v0.2.2/pywinui3-0.2.2-py3-none-win_amd64.whl
+pip install https://github.com/SystenGames/PyWinUI3/releases/download/v0.2.1/pywinui3-0.2.1-py3-none-win_amd64.whl
 ```
 
-把版本号换成 release 页面上对应的那一个。包**没有发布到 PyPI**，只能从这里装。
+这是当前已发布的版本；发布新版本后把两处版本号一起换成新标签。包**没有发布到 PyPI**，只能从这里装。
 
 wheel 的平台标签是 `win_amd64`，在 Linux / macOS 上 pip 会直接拒绝安装——
 而不是装成功之后一启动才崩。
