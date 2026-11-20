@@ -54,6 +54,10 @@ internal static class ExtendedControls
             case "Canvas2D":
                 return Canvas2DSupport.Create();
 
+            // D3D11 三维视口：真 GPU 管线，有深度缓冲与着色器
+            case "Viewport3D":
+                return Viewport3DSupport.Create();
+
             // 图元默认描边 1px、无填充，具体值由 fill / stroke / strokeWidth 属性覆盖
             case "Rect":
                 return new Rectangle { StrokeThickness = 1 };

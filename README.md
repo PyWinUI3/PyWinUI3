@@ -799,6 +799,44 @@ canvas.update_shapes([{"id": "p1", "cx": 40, "cy": 60}])   # 只改位置
 
 完整示例见 `examples/15_win2d.py`。
 
+### 6.10 D3D11 三维视口
+
+`Viewport3D` 走真 GPU 管线：有深度缓冲（正确遮挡）、顶点/像素着色器（真实光照），
+面数上限几十万，且**渲染循环完全在宿主里跑**，旋转不产生跨进程流量。
+
+```python
+viewport = ui.Viewport3D(
+    win, width=780, height=460,
+    mesh={"vertices": [[x, y, z], ...], "indices": [0, 1, 2, ...], "color": "#4FC3F7"},
+    camera={"yaw": 30, "pitch": 18, "distance": 4.0, "autoRotate": 12.0},
+)
+```
+
+| 字段 | 说明 |
+|---|---|
+| `vertices` | 顶点数组 `[[x, y, z], ...]` |
+| `indices` | 三角形索引，每 3 个一组 |
+| `color` | 基础色，光照后自动明暗 |
+| `camera.yaw` / `pitch` | 绕原点的角度（度） |
+| `camera.distance` | 相机距离 |
+| `camera.autoRotate` | 每秒自转角度，0 表示不自转 |
+
+法线由宿主按面法线自动累加，不用自己传。拖动旋转只需要改 `camera` 属性。
+
+**三种画布的分工**
+
+| | `Canvas`（XAML） | `Canvas2D`（Win2D） | `Viewport3D`（D3D11） |
+|---|---|---|---|
+| 图元/面数上限 | 几百 | 几千 | 几十万 |
+| 每帧谁在算 | 宿主重绘 XAML | Python 投影后下发 | 宿主 GPU |
+| 单独绑事件 | 能 | 不能 | 不能 |
+| 适用 | SVG 编辑 | 大量 2D 图元 | 真 3D |
+
+依赖：`Vortice.Direct3D11` / `Vortice.DXGI`，约 1.5 MB，随 exe 内嵌；
+原生 D3D 由系统提供。着色器运行时编译（`d3dcompiler_47.dll`）。
+
+完整示例见 `examples/16_viewport3d.py`。
+
 ---
 
 ## 7. 示例

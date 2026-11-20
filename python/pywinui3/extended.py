@@ -746,6 +746,46 @@ class Canvas2D(Widget):
         self._app._send_invoke(self._id, "update_shapes", {"updates": updates})
 
 
+class Viewport3D(Widget):
+    """D3D11 三维视口：真 GPU 管线，有深度缓冲与着色器。
+
+    与 :class:`Canvas2D` 的区别是「谁来算」：
+
+    - ``Canvas2D`` 每帧由 Python 投影、排序、下发多边形，面数上限几百
+    - ``Viewport3D`` 只把网格和相机交出去，渲染循环完全在宿主里跑，
+      面数上限几十万，且不产生跨进程流量
+
+    ``mesh`` 是单个网格：
+
+    ::
+
+        {"vertices": [[x, y, z], ...], "indices": [0, 1, 2, 0, 2, 3, ...], "color": "#4FC3F7"}
+
+    ``camera`` 是轨道相机（绕原点）：
+
+    ::
+
+        {"yaw": 30, "pitch": 20, "distance": 4, "autoRotate": 0}
+
+    ``autoRotate`` 为每秒自转角度，0 表示不自转。
+    """
+
+    _type = "Viewport3D"
+
+    def __init__(
+        self,
+        master: Any,
+        mesh: dict[str, Any] | None = None,
+        camera: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ):
+        if mesh is not None:
+            kwargs["mesh"] = mesh
+        if camera is not None:
+            kwargs["camera"] = camera
+        super().__init__(master, **kwargs)
+
+
 __all__ = [
     "NumberBox",
     "PasswordBox",
@@ -791,4 +831,5 @@ __all__ = [
     "Polygon",
     "Polyline",
     "Canvas2D",
+    "Viewport3D",
 ]

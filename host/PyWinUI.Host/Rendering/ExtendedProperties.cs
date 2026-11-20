@@ -580,6 +580,26 @@ internal static class ExtendedProperties
                 }
 
                 return false;
+
+            case "mesh":
+                // D3D 视口的几何：顶点 + 索引 + 颜色
+                if (e is SwapChainPanel viewport && v is JsonObject mesh)
+                {
+                    Viewport3DSupport.SetMesh(viewport, mesh);
+                    return true;
+                }
+
+                return false;
+
+            case "camera":
+                // D3D 视口的轨道相机：yaw / pitch / distance
+                if (e is SwapChainPanel cameraViewport && v is JsonObject camera)
+                {
+                    Viewport3DSupport.SetCamera(cameraViewport, camera);
+                    return true;
+                }
+
+                return false;
             case "value":
                 return ApplyExtendedValue(e, v, warn);
             case "items":

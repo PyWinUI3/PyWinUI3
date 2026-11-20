@@ -72,6 +72,7 @@ from .extended import (
     TreeView,
     TwoPaneView,
     Viewbox,
+    Viewport3D,
 )
 from .layout import Column, Frame, Grid, Row, Scroll
 from .protocol import PROTOCOL_VERSION
@@ -220,6 +221,7 @@ __all__ = [
     "Expander",
     "BorderBox",
     "Viewbox",
+    "Viewport3D",
     "RelativePanel",
     "TwoPaneView",
     "RefreshContainer",
