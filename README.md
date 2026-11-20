@@ -52,15 +52,34 @@ win.mainloop()
 
 工具链已在 Windows 10 21H2 / .NET 8.0.427 / Windows App SDK 1.8 上端到端验证。
 
-### 1.2 构建与安装
+### 1.2 安装
 
-顺序是**先构建宿主，再装 Python 包**。`tools/build_host.ps1` 执行 `dotnet build -c Release`，
-把产物复制进 `python/pywinui3/runtime/PyWinUI.Host/`；打包时由 `python/MANIFEST.in` 递归
-收进该目录，`pyproject.toml` 的 `include-package-data` 一并带上。
+**从 release 安装**（推荐；仅 Windows，需要 Python 3.10+）：
+
+```powershell
+pip install https://github.com/SystenGames/PyWinUI3/releases/download/v0.2.2/pywinui3-0.2.2-py3-none-win_amd64.whl
+```
+
+把版本号换成 release 页面上对应的那一个。包**没有发布到 PyPI**，只能从这里装。
+
+wheel 的平台标签是 `win_amd64`，在 Linux / macOS 上 pip 会直接拒绝安装——
+而不是装成功之后一启动才崩。
+
+**从源码构建**：顺序是**先构建宿主，再装 Python 包**。`tools/build_host.ps1` 执行
+`dotnet build -c Release`，把产物复制进 `python/pywinui3/runtime/PyWinUI.Host/`；
+打包时由 `python/MANIFEST.in` 递归收进该目录，`pyproject.toml` 的 `include-package-data`
+一并带上。
 
 ```powershell
 ./tools/build_host.ps1          # 构建 Release 宿主 + 复制进 runtime/
 pip install .                   # 安装 wheel，宿主随包一起安装
+```
+
+要打一个可直接分发的 wheel（会自动修正平台标签）：
+
+```powershell
+./tools/build_wheel.ps1                 # x64
+./tools/build_wheel.ps1 -Platform ARM64 # ARM64
 ```
 
 开发时可用可编辑安装，此时不必跑构建脚本，Python 侧直接从源码树查找宿主：

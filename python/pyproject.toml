@@ -2,6 +2,9 @@
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+# 平台约束靠 wheel 的平台标签（win_amd64），由 tools/build_wheel.ps1 修正。
+# METADATA 里的 Requires-Dist 只能约束依赖，约束不了包自身；classifiers 写
+# "仅 Windows" 只是提示，pip 不会据此拒绝安装。真正让非 Windows 装不上的是标签。
 [project]
 name = "pywinui3"
 version = "0.2.2"
