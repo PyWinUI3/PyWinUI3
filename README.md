@@ -57,7 +57,7 @@ win.mainloop()
 **从 release 安装**（推荐；仅 Windows，需要 Python 3.10+）：
 
 ```powershell
-pip install https://github.com/SystenGames/PyWinUI3/releases/download/v0.2.2/pywinui3-0.2.2-py3-none-win_amd64.whl
+pip install https://github.com/SystenGames/PyWinUI3/releases/download/v0.2.3/pywinui3-0.2.3-py3-none-win_amd64.whl
 ```
 
 这是当前已发布的版本；发布新版本后把两处版本号一起换成新标签。包**没有发布到 PyPI**，只能从这里装。
