@@ -102,6 +102,13 @@ class App:
         self._handlers: dict[str, Callable[..., Any]] = {}
         self._window: Any = None
 
+        #: 多窗口：session id -> Window。main 是启动时那扇，
+        #: 其余由 Window(app, session="xxx") 创建。
+        self._windows: dict[str, Any] = {}
+        self._session_seq = 0
+        #: 节点 id -> 所属会话。render/patch/事件路由都靠它。
+        self._session_of_node: dict[str, str] = {}
+
         # query() 同步等 result 时，中途到达的事件消息不能丢，先存这里，
         # 事件循环下一轮优先派发。回调里调 query 也安全（可重入）。
         # 用 deque：高频事件风暴下 list.pop(0) 是 O(n)，整轮派发会退化成 O(n²)。
@@ -210,23 +217,32 @@ class App:
     # ------------------------------------------------------------------
 
     def _attach_window(self, window: Any) -> None:
-        self._window = window
+        session = getattr(window, "_session", "main")
+        self._windows[session] = window
+        # main 始终是 _window 快捷方式指向的那扇
+        if session == "main" or self._window is None:
+            self._window = window
 
-    def _render(self) -> None:
-        if self._window is None:
+    def _render(self, window: Any | None = None) -> None:
+        """渲染一扇窗口。不传参数时渲染 main 窗口（保持旧调用方式）。"""
+        target = window if window is not None else self._window
+        if target is None:
             raise RuntimeError("还没有创建 Window，无法渲染")
         assert self._host is not None
 
+        session = getattr(target, "_session", "main")
+
         specs: list[dict[str, Any]] = []
-        self._window._collect_specs(specs)
+        target._collect_specs(specs)
 
         self._rev += 1
         self._host.send(
             protocol.render(
                 self._rev,
-                self._window._window_spec(),
-                self._window._id,
+                target._window_spec(),
+                target._id,
                 specs,
+                session=session,
             )
         )
         self._rendered = True
@@ -242,7 +258,13 @@ class App:
         # 动画/拖动依赖 after() 的精度，默认 15.6ms 会让 16ms 间隔落成 31ms
         high_resolution = _raise_timer_resolution()
         try:
+            # 渲染所有已创建的窗口：main 先渲染（触发 FirstRenderApplied），
+            # 其余会话窗口按创建顺序发送 render，宿主收到后各自建窗。
             self._render()
+            for session, window in list(self._windows.items()):
+                if session != "main":
+                    self._render(window)
+
             self._loop()
         finally:
             _restore_timer_resolution(high_resolution)
@@ -288,11 +310,28 @@ class App:
             self._dispatch_warning(message)
         elif kind == "microDone":
             self._dispatch_micro_done(message)
+        elif kind == "windowClosed":
+            self._dispatch_window_closed(message)
         elif kind == "bye":
             self._graceful = True
             self._running = False
         # ack / ready / result 无需在此处理：result 由 query() 自己配对，
         # ack 只在 render 时回一次，rev 只是序号，不做同步等待
+
+    def _dispatch_window_closed(self, message: dict[str, Any]) -> None:
+        """某个非 main 窗口被关闭：从窗口表移除，节点也一并清理。"""
+        session = str(message.get("session", "main"))
+        window = self._windows.pop(session, None)
+        if window is None:
+            return
+
+        # 这扇窗的所有节点从表里摘掉，避免事件误路由到已销毁的窗口
+        for node_id, owner in list(self._session_of_node.items()):
+            if owner == session:
+                self._nodes.pop(node_id, None)
+                del self._session_of_node[node_id]
+
+        window._destroyed = True
 
     def _dispatch_event(self, message: dict[str, Any]) -> None:
         node = self._nodes.get(str(message.get("id", "")))
@@ -434,6 +473,11 @@ class App:
         错误地并到被删掉的那个 set 上。
         """
         for op in ops:
+            # 内部键：宿主解析 PatchOp 时忽略未知字段，flush 时用它分组
+            target_id = op.get("id") or op.get("parent")
+            session = self._session_of_node.get(str(target_id), "main") if target_id else "main"
+            op = {**op, "_session": session}
+
             kind = op.get("t")
             if kind == "set":
                 key = "set:" + str(op.get("id"))
@@ -480,8 +524,14 @@ class App:
         self._pending_index = {}
         if self._host is None:
             return
-        self._rev += 1
-        self._host.send(protocol.patch(self._rev, ops))
+        by_session: dict[str, list[dict[str, Any]]] = {}
+        for op in ops:
+            session = op.pop("_session", "main")
+            by_session.setdefault(session, []).append(op)
+
+        for session, group in by_session.items():
+            self._rev += 1
+            self._host.send(protocol.patch(self._rev, group, session=session))
 
     def _schedule_flush(self) -> None:
         if self._flush_token is None:
@@ -508,12 +558,20 @@ class App:
             raise RuntimeError("宿主尚未启动，无法执行微代码")
         self._micro_seq += 1
         request_id = f"m{self._micro_seq}"
-        self._host.send(protocol.micro(request_id, node_id, program, notify=notify))
+        session = self._session_of_node.get(str(node_id), "main")
+        self._host.send(protocol.micro(request_id, node_id, program, notify=notify, session=session))
         return request_id
 
     # ------------------------------------------------------------------
     # 退出
     # ------------------------------------------------------------------
+
+    def _window_action(self, session: str, action: str) -> None:
+        """向宿主发窗口级控制；main 会话省略 session 字段由宿主补默认值。"""
+        if self._host is None:
+            return
+        self._flush_patches()
+        self._host.send(protocol.window_action(session, action))
 
     def quit(self) -> None:
         """请求关闭窗口并退出事件循环。"""
@@ -580,7 +638,8 @@ class App:
 
         self._query_seq += 1
         request_id = f"q{self._query_seq}"
-        host.send(protocol.query(request_id, node_id, key, args))
+        session = self._session_of_node.get(str(node_id), "main")
+        host.send(protocol.query(request_id, node_id, key, args, session=session))
 
         deadline = time.monotonic() + timeout
         while True:
@@ -710,6 +769,10 @@ class App:
     # 内部注册表（供 Widget 调用）
     # ------------------------------------------------------------------
 
+    def _alloc_session_id(self) -> str:
+        self._session_seq += 1
+        return f"w{self._session_seq}"
+
     def _alloc_node_id(self) -> str:
         node_id = f"n{self._node_seq}"
         self._node_seq += 1
@@ -717,9 +780,12 @@ class App:
 
     def _register_node(self, widget: Any) -> None:
         self._nodes[widget._id] = widget
+        session = getattr(widget, "_session", "main")
+        self._session_of_node[widget._id] = session
 
     def _unregister_node(self, node_id: str) -> None:
         self._nodes.pop(node_id, None)
+        self._session_of_node.pop(node_id, None)
 
     def _register_handler(self, handler: Callable[..., Any]) -> str:
         self._handler_seq += 1
@@ -756,7 +822,8 @@ class App:
         # invoke 常紧跟在 insert / set 之后（例如插入节点后立刻 focus），
         # 不 flush 的话宿主会先执行 invoke、再看到节点，报 unknown-node。
         self._flush_patches()
-        self._host.send(protocol.invoke(node_id, method, args))
+        session = self._session_of_node.get(str(node_id), "main")
+        self._host.send(protocol.invoke(node_id, method, args, session=session))
 
     # ------------------------------------------------------------------
     # 上下文管理

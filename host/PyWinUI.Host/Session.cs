@@ -1,4 +1,6 @@
+using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
+using WinRT.Interop;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -21,16 +23,47 @@ namespace PyWinUI.Host;
 ///
 /// 这套分工和 WinUI 自身的设计一致，也是它不会像进程内托管那样死锁的原因。
 /// </summary>
+/// <summary>
+/// 一扇窗口的完整上下文：窗口本身 + 绑定它的渲染器/查询器/micro 运行时 + 修订号。
+///
+/// 之所以按窗口整体打包，是因为 FormRenderer 的 emit 闭包必须知道事件来自哪扇窗，
+/// 否则多窗口时所有事件都会带上同一个 session 标记，Python 侧无法路由。
+/// </summary>
+internal sealed class WindowContext
+{
+    public required string SessionId { get; init; }
+    public required Window Window { get; init; }
+    public FormRenderer Renderer { get; set; } = null!;
+    public QueryExecutor Queries { get; set; } = null!;
+    public MicroRuntime Micro { get; set; } = null!;
+    public long Rev;
+    public bool FirstRenderNotified;
+    public bool Closed;
+}
+
 internal sealed class Session
 {
     private readonly Window _window;
     private readonly DispatcherQueue _dispatcher;
     private readonly StdioChannel _channel;
-    private readonly FormRenderer _renderer;
-    private readonly QueryExecutor _queries;
-    private readonly MicroRuntime _micro;
 
-    private long _rev;
+    /// <summary>main 上下文就是宿主启动时 App.xaml.cs 创建的窗口。</summary>
+    private readonly WindowContext _main;
+
+    /// <summary>所有会话窗口，包括 main。新 render 带未知 session 时在这里建窗。</summary>
+    private readonly Dictionary<string, WindowContext> _contexts = new();
+
+    // main 的快捷访问：绝大多数单窗口代码路径不用改动
+    private FormRenderer _renderer => _main.Renderer;
+    private QueryExecutor _queries => _main.Queries;
+    private MicroRuntime _micro => _main.Micro;
+    private long _rev { get => _main.Rev; set => _main.Rev = value; }
+    private bool _firstRenderNotified
+    {
+        get => _main.FirstRenderNotified;
+        set => _main.FirstRenderNotified = value;
+    }
+
     private bool _handshaken;
     private bool _closed;
 
@@ -47,22 +80,181 @@ internal sealed class Session
     /// </summary>
     public event Action<string?>? StartupFailed;
 
-    private bool _firstRenderNotified;
 
     public Session(Window window, DispatcherQueue dispatcher)
     {
         _window = window;
         _dispatcher = dispatcher;
         _channel = new StdioChannel();
-        _queries = new QueryExecutor(window);
-        _renderer = new FormRenderer(
-            window,
-            Emit,
-            Warn,
-            (code, message, nodeId) => Send(Outbound.Error(code, message, nodeId)));
-        _micro = new MicroRuntime(_renderer, Emit, Send);
+        _main = CreateContext("main", window);
+        _contexts["main"] = _main;
 
         _window.Closed += OnWindowClosed;
+    }
+
+    /// <summary>
+    /// 为一扇新窗口建完整上下文。emit 闭包带上 sessionId 是关键：
+    /// 事件回传时 Python 靠它路由到对应的 Window 实例。
+    /// </summary>
+    private WindowContext CreateContext(string sessionId, Window window)
+    {
+        var context = new WindowContext
+        {
+            SessionId = sessionId,
+            Window = window,
+        };
+
+        context.Queries = new QueryExecutor(window);
+        context.Renderer = new FormRenderer(
+            window,
+            (nodeId, eventName, data, echo) => Emit(sessionId, nodeId, eventName, data, echo),
+            message => Warn(sessionId, message),
+            (code, message, nodeId) => Send(Outbound.Error(code, message, nodeId, sessionId)));
+        context.Micro = new MicroRuntime(
+            context.Renderer,
+            (nodeId, eventName, data, echo) => Emit(sessionId, nodeId, eventName, data, echo),
+            line => Send(line));
+
+        return context;
+    }
+
+    /// <summary>
+    /// 为一扇新会话创建窗口。render 消息自带 window spec，
+    /// 这里的尺寸只是首帧前的占位，收到 render 后会被覆盖。
+    /// </summary>
+    private WindowContext CreateWindow(string sessionId)
+    {
+        var window = new Window
+        {
+            Title = "PyWinUI3",
+        };
+
+        // XamlRoot 在 Activate 之前为 null，部分控件首帧会失败
+        window.AppWindow.Resize(new Windows.Graphics.SizeInt32(800, 600));
+        window.Activate();
+
+        var context = CreateContext(sessionId, window);
+        window.Closed += (_, _) => OnSessionWindowClosed(sessionId);
+        _contexts[sessionId] = context;
+
+        HostLog.Write($"new window for session {sessionId}");
+        return context;
+    }
+
+    /// <summary>
+    /// 窗口级控制：hide / show / close / focus。
+    /// main 窗口关闭等于退出整个应用（保持原有语义）；
+    /// 其他会话只关自己，宿主继续跑。
+    /// </summary>
+    private void HandleWindowAction(WindowActionMessage action)
+    {
+        var context = Context(action.Session);
+        if (context is null)
+        {
+            return;
+        }
+
+        try
+        {
+            switch (action.Action)
+            {
+                case "hide":
+                    ShowWindowNative(context.Window, 0);  // SW_HIDE
+                    break;
+
+                case "show":
+                    ShowWindowNative(context.Window, 5);  // SW_SHOW
+                    context.Window.Activate();
+                    break;
+
+                case "focus":
+                    context.Window.Activate();
+                    break;
+
+                case "close":
+                    if (ReferenceEquals(context, _main))
+                    {
+                        Shutdown(0);
+                    }
+                    else
+                    {
+                        CloseSessionWindow(context, 0);
+                    }
+
+                    break;
+
+                default:
+                    Send(Outbound.Error(
+                        "bad-protocol",
+                        $"未知的 windowAction: {action.Action}",
+                        null,
+                        action.Session));
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Send(Outbound.Error("internal", $"窗口命令 {action.Action} 失败: {ex.Message}", null, action.Session));
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    private static void ShowWindowNative(Window window, int command)
+    {
+        var hwnd = WindowNative.GetWindowHandle(window);
+        ShowWindow(hwnd, command);
+    }
+
+    /// <summary>关闭一个非 main 会话窗口：回通知、清状态，宿主继续。</summary>
+    private void CloseSessionWindow(WindowContext context, int code)
+    {
+        if (context.Closed)
+        {
+            return;
+        }
+
+        context.Closed = true;
+        _contexts.Remove(context.SessionId);
+
+        try
+        {
+            context.Window.Close();
+        }
+        catch
+        {
+            // 已经关掉就忽略
+        }
+
+        Send(Outbound.WindowClosed(context.SessionId, code));
+        HostLog.Write($"session {context.SessionId} window closed");
+    }
+
+    private void OnSessionWindowClosed(string sessionId)
+    {
+        if (_contexts.TryGetValue(sessionId, out var context) && !context.Closed)
+        {
+            context.Closed = true;
+            _contexts.Remove(sessionId);
+            Send(Outbound.WindowClosed(sessionId, 0));
+        }
+    }
+
+    /// <summary>按会话 id 取窗口上下文；未知 id 回一条错误并返回 null。</summary>
+    private WindowContext? Context(string sessionId, string? nodeId = null)
+    {
+        if (_contexts.TryGetValue(sessionId, out var context) && !context.Closed)
+        {
+            return context;
+        }
+
+        Send(Outbound.Error(
+            "unknown-session",
+            $"会话不存在或已关闭: {sessionId}",
+            nodeId,
+            sessionId));
+        return null;
     }
 
     public void Start()
@@ -145,27 +337,45 @@ internal sealed class Session
         switch (message)
         {
             case RenderMessage render:
-                _rev = render.Rev;
+            {
+                // 新 session 的 render 就是「开一扇新窗口」；main 复用启动时那扇
+                var context = _contexts.TryGetValue(render.Session, out var existing)
+                    ? existing
+                    : CreateWindow(render.Session);
+
+                context.Rev = render.Rev;
                 // 窗口能力（最大化/最小化）由 ApplyWindowSpec 在成功落地窗口属性时一并交还，
                 // 渲染失败时窗口保持加载态的小尺寸——那里能最大化毫无意义。
-                _renderer.Render(render);
+                context.Renderer.Render(render);
                 Send(Outbound.Ack(render.Rev));
 
-                if (!_firstRenderNotified)
+                if (!context.FirstRenderNotified)
                 {
-                    _firstRenderNotified = true;
-                    FirstRenderApplied?.Invoke();
+                    context.FirstRenderNotified = true;
+                    if (ReferenceEquals(context, _main))
+                    {
+                        FirstRenderApplied?.Invoke();
+                    }
                 }
 
                 break;
+            }
 
             case PatchMessage patch:
-                _rev = patch.Rev;
-                _renderer.Apply(patch);
+            {
+                var context = Context(patch.Session);
+                if (context is null)
+                {
+                    break;
+                }
+
+                context.Rev = patch.Rev;
+                context.Renderer.Apply(patch);
                 // 不再逐 patch 回 ack：Python 侧从来不消费它（App._dispatch 直接忽略），
                 // 却要为每条付出一次 JSON 构造 + 管道 Flush + 对端 decode + 队列。
                 // ack 现在只作为 render 的「首帧已应用」信号保留。
                 break;
+            }
 
             case InvokeMessage invoke:
                 HandleInvoke(invoke);
@@ -176,7 +386,17 @@ internal sealed class Session
                 break;
 
             case MicroMessage micro:
-                _micro.Run(micro);
+            {
+                var context = Context(micro.Session, micro.Node);
+                if (context is not null)
+                {
+                    context.Micro.Run(micro);
+                }
+                break;
+            }
+
+            case WindowActionMessage windowAction:
+                HandleWindowAction(windowAction);
                 break;
 
             case UnknownMessage unknown:
@@ -236,13 +456,19 @@ internal sealed class Session
 
     private void HandleInvoke(InvokeMessage invoke)
     {
-        // 窗口级命令不依赖任何节点，先处理，避免根节点还没建好时被挡住
-        if (TryWindowInvoke(invoke.Method))
+        var ctx = Context(invoke.Session, invoke.Id);
+        if (ctx is null)
         {
             return;
         }
 
-        if (!_renderer.TryGetElement(invoke.Id, out var element))
+        // 窗口级命令不依赖任何节点，先处理，避免根节点还没建好时被挡住
+        if (TryWindowInvoke(invoke.Method, ctx))
+        {
+            return;
+        }
+
+        if (!ctx.Renderer.TryGetElement(invoke.Id, out var element))
         {
             Send(Outbound.Error("unknown-node", $"invoke 的目标不存在: {invoke.Id}", invoke.Id));
             return;
@@ -410,7 +636,7 @@ internal sealed class Session
     private void HandleSelectTab(InvokeMessage invoke, FrameworkElement element)
     {
         if (element is not TabViewItem tab
-            || !_renderer.TryGetOwner(invoke.Id, out var owner)
+            || !Context(invoke.Session, invoke.Id)!.Renderer.TryGetOwner(invoke.Id, out var owner)
             || owner is not TabView tabs)
         {
             Send(Outbound.Error(
@@ -420,7 +646,7 @@ internal sealed class Session
             return;
         }
 
-        var alreadyBound = _renderer.IsEventBound(invoke.Id, "tabSelected");
+        var alreadyBound = Context(invoke.Session, invoke.Id)!.Renderer.IsEventBound(invoke.Id, "tabSelected");
         tabs.SelectedItem = tab;
 
         if (!alreadyBound)
@@ -437,7 +663,7 @@ internal sealed class Session
     /// 最小化 / 最大化 / 还原 / 激活。这些是 OverlappedPresenter 的能力，
     /// 全屏或紧凑型 presenter 下静默跳过，不让整个窗口报错。
     /// </summary>
-    private bool TryWindowInvoke(string method)
+    private bool TryWindowInvoke(string method, WindowContext ctx)
     {
         if (method is not ("minimize" or "maximize" or "restore" or "activate"))
         {
@@ -448,11 +674,11 @@ internal sealed class Session
         {
             if (method == "activate")
             {
-                _window.Activate();
+                ctx.Window.Activate();
                 return true;
             }
 
-            if (_window.AppWindow.Presenter is OverlappedPresenter presenter)
+            if (ctx.Window.AppWindow.Presenter is OverlappedPresenter presenter)
             {
                 switch (method)
                 {
@@ -477,15 +703,22 @@ internal sealed class Session
     /// </summary>
     private void HandleQuery(QueryMessage query)
     {
-        _renderer.TryGetElement(query.Node, out var element);
+        var ctx = Context(query.Session, query.Node);
+        if (ctx is null)
+        {
+            Send(Outbound.Result(query.Id, false, null, "会话不存在", query.Session));
+            return;
+        }
+
+        ctx.Renderer.TryGetElement(query.Node, out var element);
         try
         {
-            var value = _queries.Read(element, query.Key, query.Args);
-            Send(Outbound.Result(query.Id, true, value));
+            var value = ctx.Queries.Read(element, query.Key, query.Args);
+            Send(Outbound.Result(query.Id, true, value, null, query.Session));
         }
         catch (Exception ex)
         {
-            Send(Outbound.Result(query.Id, false, null, ex.Message));
+            Send(Outbound.Result(query.Id, false, null, ex.Message, query.Session));
         }
     }
 
@@ -670,14 +903,22 @@ internal sealed class Session
     // 出站
     // ==================================================================
 
-    private void Emit(string nodeId, string eventName, JsonObject? data, bool echo)
+    private void Emit(string nodeId, string eventName, JsonObject? data, bool echo) =>
+        Emit("main", nodeId, eventName, data, echo);
+
+    private void Emit(string sessionId, string nodeId, string eventName, JsonObject? data, bool echo)
     {
         if (_closed)
         {
             return;
         }
 
-        Send(Outbound.Event(nodeId, eventName, _rev, data, echo));
+        if (!_contexts.TryGetValue(sessionId, out var context))
+        {
+            return;
+        }
+
+        Send(Outbound.Event(nodeId, eventName, context.Rev, data, echo, sessionId));
     }
 
     private void Send(string line)
@@ -704,7 +945,9 @@ internal sealed class Session
     /// 去重是必要的：渲染循环里同一条告警可能每帧产生一次，
     /// 不去重会把管道和 stderr 一起刷爆。窗口 1 秒。
     /// </summary>
-    private void Warn(string message)
+    private void Warn(string message) => Warn("main", message);
+
+    private void Warn(string sessionId, string message)
     {
         // 日志写在去重**之后**：旧实现放在最前面，渲染循环里同一条告警
         // 每帧产生一次时，回传被挡住了，磁盘写却一次没少。
@@ -737,7 +980,7 @@ internal sealed class Session
 
         _recentWarnings[message] = now;
         HostLog.Write("[warn] " + message);
-        Send(Outbound.Warning(message));
+        Send(Outbound.Warning(message, null, sessionId));
     }
 
     private static string Truncate(string text) =>

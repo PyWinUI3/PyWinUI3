@@ -15,6 +15,9 @@ public sealed record HelloMessage : InboundMessage
 
 public sealed record RenderMessage : InboundMessage
 {
+    /// <summary>目标会话 id，缺省 main。首帧带新 id 时宿主会新建窗口。</summary>
+    public string Session { get; init; } = "main";
+
     public required long Rev { get; init; }
     public required WindowSpec Window { get; init; }
     public required string Root { get; init; }
@@ -25,6 +28,8 @@ public sealed record RenderMessage : InboundMessage
 
 public sealed record PatchMessage : InboundMessage
 {
+    public string Session { get; init; } = "main";
+
     public required long Rev { get; init; }
 
     /// <summary>按数组顺序依次应用，操作之间允许有依赖。</summary>
@@ -33,6 +38,8 @@ public sealed record PatchMessage : InboundMessage
 
 public sealed record InvokeMessage : InboundMessage
 {
+    public string Session { get; init; } = "main";
+
     public required string Id { get; init; }
     public required string Method { get; init; }
     public JsonObject? Args { get; init; }
@@ -44,6 +51,8 @@ public sealed record InvokeMessage : InboundMessage
 /// </summary>
 public sealed record QueryMessage : InboundMessage
 {
+    public string Session { get; init; } = "main";
+
     /// <summary>请求 id，回包原样带回，便于并发时配对。</summary>
     public required string Id { get; init; }
 
@@ -85,6 +94,16 @@ public sealed record FileDialogMessage : InboundMessage
     public string? DefaultName { get; init; }
 }
 
+/// <summary>
+/// 窗口级控制：hide / show / close / focus。
+/// 与 close 协议命令不同，这里只关一个会话窗口，不结束整个宿主。
+/// </summary>
+public sealed record WindowActionMessage : InboundMessage
+{
+    public string Session { get; init; } = "main";
+    public required string Action { get; init; }
+}
+
 public sealed record CloseMessage : InboundMessage
 {
     public int Code { get; init; }
@@ -99,6 +118,8 @@ public sealed record CloseMessage : InboundMessage
 /// </summary>
 public sealed record MicroMessage : InboundMessage
 {
+    public string Session { get; init; } = "main";
+
     public required string Id { get; init; }
     public required string Node { get; init; }
     public required JsonArray Program { get; init; }
@@ -149,6 +170,7 @@ public static class Inbound
                 "dialog" => ParseDialog(root),
                 "fileDialog" => ParseFileDialog(root),
                 "close" => ParseClose(root),
+                "windowAction" => ParseWindowAction(root),
                 // 新增 op 不算不兼容变更，旧端遇到新消息应当忽略而不是终止会话。
                 // 字段缺失/类型错误走 bad-protocol：回一条 error 后跳过这一行，
                 // 同样不终止——消息逐行分帧，坏一行不影响下一行。
@@ -174,6 +196,10 @@ public static class Inbound
 
         return new RenderMessage
         {
+            Session = e.TryGetProperty("session", out var sessionElement)
+                && sessionElement.ValueKind == JsonValueKind.String
+                ? sessionElement.GetString() ?? "main"
+                : "main",
             Rev = RequireLong(e, "rev"),
             Window = ParseWindow(RequireElement(e, "window")),
             Root = RequireString(e, "root"),
@@ -188,11 +214,17 @@ public static class Inbound
         foreach (var o in opsElement.EnumerateArray())
             ops.Add(ParseOp(o));
 
-        return new PatchMessage { Rev = RequireLong(e, "rev"), Ops = ops };
+        return new PatchMessage
+        {
+            Session = TryString(e, "session") ?? "main",
+            Rev = RequireLong(e, "rev"),
+            Ops = ops,
+        };
     }
 
     private static InvokeMessage ParseInvoke(JsonElement e) => new()
     {
+        Session = TryString(e, "session") ?? "main",
         Id = RequireString(e, "id"),
         Method = RequireString(e, "method"),
         Args = e.TryGetProperty("args", out var a) && a.ValueKind == JsonValueKind.Object
@@ -202,12 +234,19 @@ public static class Inbound
 
     private static QueryMessage ParseQuery(JsonElement e) => new()
     {
+        Session = TryString(e, "session") ?? "main",
         Id = RequireString(e, "id"),
         Node = RequireString(e, "node"),
         Key = RequireString(e, "key"),
         Args = e.TryGetProperty("args", out var a) && a.ValueKind == JsonValueKind.Object
             ? ToJsonObject(a)
             : null,
+    };
+
+    private static WindowActionMessage ParseWindowAction(JsonElement e) => new()
+    {
+        Session = TryString(e, "session") ?? "main",
+        Action = RequireString(e, "action"),
     };
 
     private static CloseMessage ParseClose(JsonElement e) => new()

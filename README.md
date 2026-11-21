@@ -818,6 +818,32 @@ canvas.update_shapes([{"id": "p1", "cx": 40, "cy": 60}])   # 只改位置
 
 完整示例见 `examples/15_win2d.py`。
 
+### 6.11 多窗口与窗口控制
+
+一个 `App` 可以有多扇窗。第一扇是 `main` 会话，之后每扇自动分配 `w1` / `w2` ...：
+
+```python
+app = ui.App()
+main = ui.Window(app, title="主窗口")
+second = ui.Window(app, title="副窗口")   # session = w1
+
+second.hide()     # 隐藏但保留会话
+second.show()     # 显示并激活
+second.focus()    # 只激活
+second.close()    # 只关这一扇，main 不受影响
+
+main.mainloop()   # 启动时会把所有已创建窗口都渲染出来
+```
+
+每扇窗有独立的控件树，事件按会话路由。main 窗口关闭会退出整个应用，
+和单窗口时行为一致。
+
+运行时再新建窗口也可以：构造 `Window(app, session="custom")` 后调 `win.render()`
+把控件树发给宿主，宿主会为新会话建一扇窗。
+
+协议层为向后兼容，main 会话的报文不写 `session` 字段，
+与旧版宿主完全一致。完整示例见 `examples/17_multiwindow.py`。
+
 ### 6.10 D3D11 三维视口
 
 `Viewport3D` 走真 GPU 管线：有深度缓冲（正确遮挡）、顶点/像素着色器（真实光照），

@@ -75,6 +75,13 @@ def decode(line: str | bytes) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
+def _session_field(message: dict[str, Any], session: str) -> dict[str, Any]:
+    """main 会话不写 session 字段，保持与旧版宿主的报文完全一致。"""
+    if session and session != "main":
+        message["session"] = session
+    return message
+
+
 def hello(pid: int, client: str = CLIENT_ID) -> dict[str, Any]:
     return {"op": "hello", "protocol": PROTOCOL_VERSION, "client": client, "pid": pid}
 
@@ -84,25 +91,31 @@ def render(
     window: dict[str, Any],
     root: str,
     nodes: Iterable[dict[str, Any]],
+    session: str = "main",
 ) -> dict[str, Any]:
-    return {
+    return _session_field({
         "op": "render",
         "rev": rev,
         "window": window,
         "root": root,
         "nodes": list(nodes),
-    }
+    }, session)
 
 
-def patch(rev: int, ops: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    return {"op": "patch", "rev": rev, "ops": list(ops)}
+def patch(rev: int, ops: Iterable[dict[str, Any]], session: str = "main") -> dict[str, Any]:
+    return _session_field({"op": "patch", "rev": rev, "ops": list(ops)}, session)
 
 
-def invoke(node_id: str, method: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+def invoke(
+    node_id: str,
+    method: str,
+    args: dict[str, Any] | None = None,
+    session: str = "main",
+) -> dict[str, Any]:
     message: dict[str, Any] = {"op": "invoke", "id": node_id, "method": method}
     if args:
         message["args"] = args
-    return message
+    return _session_field(message, session)
 
 
 def query(
@@ -110,6 +123,7 @@ def query(
     node_id: str,
     key: str,
     args: dict[str, Any] | None = None,
+    session: str = "main",
 ) -> dict[str, Any]:
     """向宿主读一个运行时值。宿主回一条 ``t="result"`` 的消息配对。
 
@@ -124,7 +138,7 @@ def query(
     }
     if args:
         message["args"] = args
-    return message
+    return _session_field(message, session)
 
 
 def dialog(title: str, body: str, kind: str = "info") -> dict[str, Any]:
@@ -159,6 +173,16 @@ def file_dialog(
     if default_name is not None:
         message["defaultName"] = default_name
     return message
+
+
+def window_action(session: str, action: str) -> dict[str, Any]:
+    """窗口级控制：hide / show / focus / close。
+
+    与 ``close`` 不同，这里只操作指定会话的那一扇窗，不结束整个宿主。
+    """
+    if action not in ("hide", "show", "focus", "close"):
+        raise ValueError(f"未知的窗口动作: {action!r}")
+    return {"op": "windowAction", "session": session, "action": action}
 
 
 def close(code: int = 0) -> dict[str, Any]:
@@ -221,6 +245,7 @@ def micro(
     program: Iterable[dict[str, Any]],
     *,
     notify: bool = False,
+    session: str = "main",
 ) -> dict[str, Any]:
     """把一小段指令交给宿主在 UI 线程内执行，避免逐帧跨进程往返。
 
@@ -246,6 +271,7 @@ def micro(
         "node": node_id,
         "program": ops,
     }
+    _session_field(message, session)
     if notify:
         message["notify"] = True
     return message

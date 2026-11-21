@@ -28,9 +28,12 @@ public static class Outbound
 
     public static string Ack(long rev) => Serialize(new { t = "ack", rev });
 
-    public static string Event(string id, string eventName, long rev, JsonObject? data, bool echo) => Serialize(new
+    public static string Event(
+        string id, string eventName, long rev, JsonObject? data, bool echo, string? session = null) => Serialize(new
     {
         t = "event",
+        // main 会话不输出，保持与旧版 Python 完全一样的报文形状
+        session = Normalize(session),
         id,
         @event = eventName,
         rev,
@@ -43,9 +46,11 @@ public static class Outbound
     /// query 的应答。value 允许是任意 JSON 值（数字、字符串、布尔、数组、对象、null）。
     /// 失败时 ok=false 并带 error，Python 侧据此抛异常而不是静默返回 None。
     /// </summary>
-    public static string Result(string id, bool ok, JsonNode? value, string? error = null) => Serialize(new
+    public static string Result(
+        string id, bool ok, JsonNode? value, string? error = null, string? session = null) => Serialize(new
     {
         t = "result",
+        session = Normalize(session),
         id,
         ok,
         value = SanitizeNonFinite(value),
@@ -56,9 +61,10 @@ public static class Outbound
     /// 非致命诊断。属性名拼错、未知控件类型、事件名写错这类问题不会让渲染失败，
     /// 但只写进 %TEMP% 日志等于没告诉用户——所以单独回传一条，Python 侧默认打到 stderr。
     /// </summary>
-    public static string Warning(string message, string? id = null) => Serialize(new
+    public static string Warning(string message, string? id = null, string? session = null) => Serialize(new
     {
         t = "warning",
+        session = Normalize(session),
         message,
         id,
     });
@@ -102,15 +108,24 @@ public static class Outbound
         return array;
     }
 
-    public static string Error(string code, string message, string? id = null) => Serialize(new
+    public static string Error(string code, string message, string? id = null, string? session = null) => Serialize(new
     {
         t = "error",
+        session = Normalize(session),
         code,
         message,
         id,
     });
 
     public static string Bye(int code) => Serialize(new { t = "bye", code });
+
+    /// <summary>某个会话窗口关闭：只影响那一扇窗，不终止宿主。</summary>
+    public static string WindowClosed(string session, int code) => Serialize(new
+    {
+        t = "windowClosed",
+        session,
+        code,
+    });
 
     /// <summary>
     /// 把 NaN / Infinity 换成 null。
@@ -182,6 +197,10 @@ public static class Outbound
         node is JsonValue value
         && value.TryGetValue<double>(out var number)
         && !double.IsFinite(number);
+
+    /// <summary>main 会话不写 session 字段，保持旧报文形状。</summary>
+    private static string? Normalize(string? session) =>
+        string.IsNullOrEmpty(session) || session == "main" ? null : session;
 
     private static string Serialize<T>(T value) =>
         JsonSerializer.Serialize(value, Wire.Json);

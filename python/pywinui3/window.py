@@ -77,10 +77,16 @@ class Window(Widget):
         height: int = 600,
         scroll: bool = True,
         layout: str = "column",
+        session: str | None = None,
         **kwargs: Any,
     ):
         # 不走 super().__init__：Window 没有 master，初始化路径与普通控件不同
         self._app = app if app is not None else App.default()
+
+        # session=None 时：第一扇窗是 main，后续自动分配 w1/w2...
+        if session is None:
+            session = "main" if not self._app._windows else self._app._alloc_session_id()
+        self._session = session
         self._type = self._LAYOUTS.get(layout, "Column")
         self._id = self._app._alloc_node_id()
         self._parent = None
@@ -156,6 +162,28 @@ class Window(Widget):
     def mainloop(self) -> None:
         """起宿主、渲染、进入事件循环。"""
         self._app.mainloop()
+
+    # ---- 窗口级控制 ----
+
+    def hide(self) -> None:
+        """隐藏窗口但保持会话，之后可用 :meth:`show` 恢复。"""
+        self._app._window_action(self._session, "hide")
+
+    def show(self) -> None:
+        """显示并激活一扇之前隐藏的窗口。"""
+        self._app._window_action(self._session, "show")
+
+    def focus(self) -> None:
+        """把窗口激活到前台。"""
+        self._app._window_action(self._session, "focus")
+
+    def close(self) -> None:
+        """关闭这扇窗口；若是 main 窗口则退出整个应用。"""
+        self._app._window_action(self._session, "close")
+
+    def render(self) -> None:
+        """把这扇窗口的控件树发给宿主。多窗口时每扇窗都要调一次。"""
+        self._app._render(self)
 
     def quit(self) -> None:
         self._app.quit()
