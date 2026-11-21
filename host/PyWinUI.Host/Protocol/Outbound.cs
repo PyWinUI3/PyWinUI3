@@ -82,10 +82,12 @@ public static class Outbound
     /// 文件对话框的应答。ok=false 表示用户取消；paths 是选中的路径列表
     /// （single/save/folder 恒为 1 项，openMultiple 可以是多项或空）。
     /// </summary>
-    public static string FileDialogResult(string id, bool ok, IReadOnlyList<string>? paths, string? error = null) =>
+    public static string FileDialogResult(
+        string id, bool ok, IReadOnlyList<string>? paths, string? error = null, string? session = null) =>
         Serialize(new
         {
             t = "fileDialogResult",
+            session = Normalize(session),
             id,
             ok,
             paths = SanitizePaths(ok ? paths : null),
@@ -118,6 +120,14 @@ public static class Outbound
     });
 
     public static string Bye(int code) => Serialize(new { t = "bye", code });
+
+    /// <summary>托盘图标被点击。what: click / doubleClick / rightClick / middleClick。</summary>
+    public static string TrayEvent(string id, string what) => Serialize(new
+    {
+        t = "trayEvent",
+        id,
+        @event = what,
+    });
 
     /// <summary>某个会话窗口关闭：只影响那一扇窗，不终止宿主。</summary>
     public static string WindowClosed(string session, int code) => Serialize(new

@@ -34,6 +34,21 @@ internal static class SystemFilePicker
         string? defaultName)
     {
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+
+        // 优先用系统 IFileDialog COM 接口：支持自定义标题、初始目录、按钮文字。
+        // 失败（COM 不可用、沙箱限制等）时回退到 WinRT picker，保证功能不丢。
+        try
+        {
+            // IFileDialog.Show 本身就阻塞到用户关闭，且在 UI 线程（STA）调用
+            // 才符合 COM 单元要求——放到 Task.Run 的 MTA 线程会单元不匹配。
+            return NativeFileDialog.Show(
+                hwnd, mode, title, initialDir, filter, defaultName);
+        }
+        catch (Exception ex)
+        {
+            HostLog.Write($"[fileDialog] 系统 IFileDialog 不可用，回退 WinRT picker: {ex.Message}");
+        }
+
         var extensions = ParseExtensions(filter);
 
         switch (mode)

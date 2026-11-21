@@ -90,6 +90,9 @@ internal sealed class Session
         _contexts["main"] = _main;
 
         _window.Closed += OnWindowClosed;
+
+        // 托盘回调走 Win32 消息，复用主窗口句柄挂 WndProc 子类
+        TraySupport.Initialize(_window, (id, what) => Send(Outbound.TrayEvent(id, what)));
     }
 
     /// <summary>
@@ -139,6 +142,32 @@ internal sealed class Session
 
         HostLog.Write($"new window for session {sessionId}");
         return context;
+    }
+
+    private void HandleTray(TrayMessage message)
+    {
+        try
+        {
+            switch (message.Action)
+            {
+                case "create":
+                    TraySupport.Create(message.Id, message.Spec);
+                    break;
+                case "update":
+                    TraySupport.Update(message.Id, message.Spec);
+                    break;
+                case "destroy":
+                    TraySupport.Destroy(message.Id);
+                    break;
+                default:
+                    Send(Outbound.Error("bad-protocol", $"未知的托盘动作: {message.Action}", null));
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Send(Outbound.Error("internal", $"托盘操作失败: {ex.Message}", null));
+        }
     }
 
     /// <summary>
@@ -397,6 +426,10 @@ internal sealed class Session
 
             case WindowActionMessage windowAction:
                 HandleWindowAction(windowAction);
+                break;
+
+            case TrayMessage tray:
+                HandleTray(tray);
                 break;
 
             case UnknownMessage unknown:
@@ -757,7 +790,8 @@ internal sealed class Session
     // 对话框
     // ==================================================================
 
-    private bool _dialogOpen;
+    /// <summary>正在显示对话框的会话集合：ContentDialog 同一 XamlRoot 只能开一个。</summary>
+    private readonly HashSet<string> _dialogSessions = new();
 
     /// <summary>
     /// 显示模态对话框。
@@ -767,29 +801,36 @@ internal sealed class Session
     /// </summary>
     private async void ShowDialog(DialogMessage message)
     {
-        if (_dialogOpen)
+        var ctx = Context(message.Session);
+        if (ctx is null)
         {
-            Send(Outbound.Error("busy", "已有对话框未关闭，本次请求被丢弃", null));
+            return;
+        }
+
+        // 同一会话只能有一个 ContentDialog；不同会话各有 XamlRoot，可以并发
+        if (!_dialogSessions.Add(message.Session))
+        {
+            Send(Outbound.Error("busy", "该窗口已有对话框未关闭，本次请求被丢弃", null, message.Session));
             return;
         }
 
         // 窗口 Content 刚切换完的那一帧 XamlRoot 可能还是 null，
         // 此时直接放弃会让「启动后立刻弹提示」这种常见用法莫名失效。
         // 等几帧再取，最多 500ms；ContentDialog 本来就是异步的，等得起。
-        var xamlRoot = _window.Content?.XamlRoot;
+        var xamlRoot = ctx.Window.Content?.XamlRoot;
         for (var attempt = 0; attempt < 10 && xamlRoot is null; attempt++)
         {
             await Task.Delay(50);
-            xamlRoot = _window.Content?.XamlRoot;
+            xamlRoot = ctx.Window.Content?.XamlRoot;
         }
 
         if (xamlRoot is null)
         {
-            Send(Outbound.Error("internal", "窗口还没有内容，无法显示对话框", null));
+            _dialogSessions.Remove(message.Session);
+            Send(Outbound.Error("internal", "窗口还没有内容，无法显示对话框", null, message.Session));
             return;
         }
 
-        _dialogOpen = true;
         try
         {
             // kind 以前解析了却没用：info / warn / error 三个级别长得一模一样。
@@ -844,7 +885,7 @@ internal sealed class Session
         }
         finally
         {
-            _dialogOpen = false;
+            _dialogSessions.Remove(message.Session);
         }
     }
 
@@ -856,17 +897,24 @@ internal sealed class Session
     /// </summary>
     private async void ShowFileDialog(FileDialogMessage message)
     {
-        if (_dialogOpen)
+        var ctx = Context(message.Session);
+        if (ctx is null)
         {
-            Send(Outbound.FileDialogResult(message.Id, false, null, "已有对话框未关闭"));
+            Send(Outbound.FileDialogResult(message.Id, false, null, "会话不存在", message.Session));
             return;
         }
 
-        _dialogOpen = true;
+        // 文件选择器是独立窗口，按会话串行即可，不同窗口可并发
+        if (!_dialogSessions.Add(message.Session))
+        {
+            Send(Outbound.FileDialogResult(message.Id, false, null, "该窗口已有对话框未关闭"));
+            return;
+        }
+
         try
         {
             var outcome = await SystemFilePicker.ShowAsync(
-                _window,
+                ctx.Window,
                 message.Mode,
                 message.Title,
                 message.InitialDir,
@@ -882,7 +930,7 @@ internal sealed class Session
         }
         finally
         {
-            _dialogOpen = false;
+            _dialogSessions.Remove(message.Session);
         }
     }
 
@@ -1039,6 +1087,14 @@ internal sealed class Session
 
         _exitCode = code;
         HostLog.Write($"shutdown (code={code})");
+
+        // 清理托盘图标：Shell_NotifyIcon 加的图标不会随进程退出自动消失，
+        // 不清会在通知区域留下僵尸图标，直到鼠标移上去才消失。
+        foreach (var id in TraySupport.AllIds())
+        {
+            TraySupport.Destroy(id);
+        }
+
 
         // 先正常关窗口，让 closing 事件能发出去——Emit 会检查 _closed，
         // 所以不能像以前那样先把 _closed 置位再退出。

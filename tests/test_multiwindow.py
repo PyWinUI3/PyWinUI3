@@ -49,3 +49,28 @@ class TestMultiWindowApi(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTrayProtocol(unittest.TestCase):
+    def test_tray_messages(self):
+        self.assertEqual(
+            protocol.tray("create", "main", {"tooltip": "test"}),
+            {"op": "tray", "action": "create", "id": "main",
+             "spec": {"tooltip": "test"}},
+        )
+        self.assertEqual(protocol.tray("destroy", "main"),
+                         {"op": "tray", "action": "destroy", "id": "main"})
+        with self.assertRaises(ValueError):
+            protocol.tray("unknown", "main")
+
+    def test_dialog_session(self):
+        self.assertNotIn("session", protocol.dialog("t", "b"))
+        self.assertEqual(protocol.dialog("t", "b", session="w1")["session"], "w1")
+        self.assertNotIn("session", protocol.file_dialog("q1", "open"))
+        self.assertEqual(protocol.file_dialog("q1", "open", session="w1")["session"], "w1")
+
+    def test_tray_icon_class(self):
+        self.assertTrue(hasattr(ui, "TrayIcon"))
+        self.assertTrue(hasattr(ui.TrayIcon, "on_click"))
+        self.assertTrue(hasattr(ui.TrayIcon, "on_right_click"))
+        self.assertTrue(hasattr(ui.TrayIcon, "destroy"))

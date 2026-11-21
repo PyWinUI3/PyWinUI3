@@ -29,6 +29,7 @@ from .errors import (
 from .event import Event
 from .extended import (
     AutoSuggestBox,
+    TrayIcon,
     BorderBox,
     BreadcrumbBar,
     CalendarDatePicker,
@@ -150,6 +151,7 @@ __all__ = [
     # 应用与窗口
     "App",
     "Window",
+    "TrayIcon",
     # 布局
     "Column",
     "Row",

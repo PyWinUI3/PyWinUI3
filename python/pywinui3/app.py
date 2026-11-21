@@ -108,6 +108,8 @@ class App:
         self._session_seq = 0
         #: 节点 id -> 所属会话。render/patch/事件路由都靠它。
         self._session_of_node: dict[str, str] = {}
+        #: 托盘图标注册表
+        self._trays: dict[str, Any] = {}
 
         # query() 同步等 result 时，中途到达的事件消息不能丢，先存这里，
         # 事件循环下一轮优先派发。回调里调 query 也安全（可重入）。
@@ -312,11 +314,20 @@ class App:
             self._dispatch_micro_done(message)
         elif kind == "windowClosed":
             self._dispatch_window_closed(message)
+        elif kind == "trayEvent":
+            self._dispatch_tray_event(message)
         elif kind == "bye":
             self._graceful = True
             self._running = False
         # ack / ready / result 无需在此处理：result 由 query() 自己配对，
         # ack 只在 render 时回一次，rev 只是序号，不做同步等待
+
+    def _dispatch_tray_event(self, message: dict[str, Any]) -> None:
+        icon_id = str(message.get("id", ""))
+        what = str(message.get("event", ""))
+        tray = self._trays.get(icon_id)
+        if tray is not None:
+            tray._dispatch(what)
 
     def _dispatch_window_closed(self, message: dict[str, Any]) -> None:
         """某个非 main 窗口被关闭：从窗口表移除，节点也一并清理。"""
@@ -566,6 +577,17 @@ class App:
     # 退出
     # ------------------------------------------------------------------
 
+    def _host_send(self, message: dict[str, Any]) -> None:
+        """直接发一条协议报文（托盘、窗口控制等非控件消息）。"""
+        if self._host is not None:
+            self._host.send(message)
+
+    def _register_tray(self, tray: Any) -> None:
+        self._trays[tray._id] = tray
+
+    def _unregister_tray(self, icon_id: str) -> None:
+        self._trays.pop(icon_id, None)
+
     def _window_action(self, session: str, action: str) -> None:
         """向宿主发窗口级控制；main 会话省略 session 字段由宿主补默认值。"""
         if self._host is None:
@@ -587,7 +609,7 @@ class App:
 
     destroy = quit
 
-    def dialog(self, title: str, body: str, kind: str = "info") -> None:
+    def dialog(self, title: str, body: str, kind: str = "info", session: str = "main") -> None:
         """弹出模态对话框。
 
         会阻塞窗口交互，所以只适合演示和调试；生产界面请用界面内的状态文字。
@@ -597,7 +619,7 @@ class App:
             return
         self._flush_patches()
         try:
-            self._host.send(protocol.dialog(title, body, kind))
+            self._host.send(protocol.dialog(title, body, kind, session=session))
         except HostExited:
             pass
 
@@ -675,6 +697,7 @@ class App:
         filter: str | None = None,
         default_name: str | None = None,
         timeout: float | None = 300.0,
+        session: str = "main",
     ) -> list[str]:
         """弹出文件选择对话框，同步返回选中的路径列表。
 
@@ -689,9 +712,8 @@ class App:
         ``filter`` 是分号分隔的扩展名，如 ``"*.txt;*.py"``（也接受
         ``"图片|*.png;*.jpg"`` 这种带标签的写法）；``default_name`` 预填文件名。
 
-        注意系统选择器的限制：``title`` 和 ``initial_dir`` 不会生效（系统窗口
-        不支持自定义标题，初始位置由系统记忆），这是换取原生外观和最近位置
-        记忆的代价。
+        ``title`` 通过系统 IFileDialog 的 SetTitle 生效，``initial_dir`` 指定
+        初始目录；两者不可用时会自动回退到 WinRT picker。
 
         返回路径列表；用户取消返回空列表。默认等 300 秒——模态对话框
         由人操作，不像 query 那样几毫秒就能回。传 ``timeout=None`` 可无限等。
@@ -713,6 +735,7 @@ class App:
             initial_dir=initial_dir,
             filter=filter,
             default_name=default_name,
+            session=session,
         ))
 
         deadline = None if timeout is None else time.monotonic() + timeout

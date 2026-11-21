@@ -844,6 +844,36 @@ main.mainloop()   # 启动时会把所有已创建窗口都渲染出来
 协议层为向后兼容，main 会话的报文不写 `session` 字段，
 与旧版宿主完全一致。完整示例见 `examples/17_multiwindow.py`。
 
+### 6.12 托盘图标
+
+```python
+tray = ui.TrayIcon("app", icon="C:/path/app.ico", tooltip="我的应用")
+tray.on_click(lambda e: print("点击", e.name))
+tray.on_right_click(lambda e: print("右键"))
+tray.update(tooltip="新提示")
+tray.destroy()
+```
+
+托盘回调走 Win32 消息，宿主复用主窗口句柄挂 WndProc 子类接收，
+不需要额外的消息循环。退出时会自动清理所有图标，不留僵尸。
+
+### 6.13 多窗口并发弹窗与文件对话框
+
+对话框按会话串行：同一扇窗同时只能开一个，不同窗口可以并发弹窗。
+
+```python
+app.dialog("提示", "主窗口的消息", session="main")
+app.dialog("提示", "副窗口的消息", session="w1")
+```
+
+文件对话框现在优先走系统 `IFileDialog` COM 接口，**支持自定义标题和初始目录**：
+
+```python
+paths = app.file_dialog("open", title="请选择文件", initial_dir="D:/docs")
+```
+
+COM 调用不可用时自动回退到 WinRT picker（标题会被忽略）。
+
 ### 6.10 D3D11 三维视口
 
 `Viewport3D` 走真 GPU 管线：有深度缓冲（正确遮挡）、顶点/像素着色器（真实光照），

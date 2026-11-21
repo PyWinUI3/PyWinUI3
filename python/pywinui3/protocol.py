@@ -141,9 +141,13 @@ def query(
     return _session_field(message, session)
 
 
-def dialog(title: str, body: str, kind: str = "info") -> dict[str, Any]:
+def dialog(
+    title: str, body: str, kind: str = "info", session: str = "main"
+) -> dict[str, Any]:
     """弹出模态对话框。会阻塞窗口交互，适合调试与演示。"""
-    return {"op": "dialog", "title": title, "body": body, "kind": kind}
+    return _session_field(
+        {"op": "dialog", "title": title, "body": body, "kind": kind}, session
+    )
 
 
 def file_dialog(
@@ -154,8 +158,9 @@ def file_dialog(
     initial_dir: str | None = None,
     filter: str | None = None,
     default_name: str | None = None,
+    session: str = "main",
 ) -> dict[str, Any]:
-    """打开文件选择对话框（自绘，不用原生 Picker）。
+    """打开文件选择对话框（系统 IFileDialog，支持自定义标题）。
 
     ``mode`` 取 ``open`` / ``openMultiple`` / ``save`` / ``folder``。
     宿主回一条 ``t="fileDialogResult"`` 的消息，用 ``id`` 配对。
@@ -172,7 +177,17 @@ def file_dialog(
         message["filter"] = filter
     if default_name is not None:
         message["defaultName"] = default_name
-    return message
+    return _session_field(message, session)
+
+
+def tray(action: str, icon_id: str, spec: dict[str, Any] | None = None) -> dict[str, Any]:
+    """托盘图标操作：create / update / destroy。"""
+    if action not in ("create", "update", "destroy"):
+        raise ValueError(f"未知的托盘动作: {action!r}")
+    msg: dict[str, Any] = {"op": "tray", "action": action, "id": icon_id}
+    if spec is not None:
+        msg["spec"] = spec
+    return msg
 
 
 def window_action(session: str, action: str) -> dict[str, Any]:

@@ -51,7 +51,7 @@ class TestExtendedExports(unittest.TestCase):
 
     def test_extended_count(self):
         # 0.2.2 起：Icon（35→36）、画布图元 +7（→43）、Canvas2D（→44）、Viewport3D（→45）
-        self.assertEqual(len(EXTENDED_NAMES), 45)
+        self.assertEqual(len(EXTENDED_NAMES), 46)
 
     def test_no_duplicate_exports(self):
         self.assertEqual(len(ui.__all__), len(set(ui.__all__)))

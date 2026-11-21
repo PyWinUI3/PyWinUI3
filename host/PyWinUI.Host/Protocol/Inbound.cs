@@ -68,6 +68,7 @@ public sealed record QueryMessage : InboundMessage
 /// <summary>弹出模态对话框。主要用于调试和演示，会阻塞窗口交互。</summary>
 public sealed record DialogMessage : InboundMessage
 {
+    public string Session { get; init; } = "main";
     public string Title { get; init; } = "提示";
     public string Body { get; init; } = "";
 
@@ -82,6 +83,7 @@ public sealed record DialogMessage : InboundMessage
 /// </summary>
 public sealed record FileDialogMessage : InboundMessage
 {
+    public string Session { get; init; } = "main";
     /// <summary>请求 id，回包原样带回。</summary>
     public required string Id { get; init; }
 
@@ -92,6 +94,14 @@ public sealed record FileDialogMessage : InboundMessage
     public string? InitialDir { get; init; }
     public string? Filter { get; init; }
     public string? DefaultName { get; init; }
+}
+
+/// <summary>托盘图标操作：create / update / destroy。</summary>
+public sealed record TrayMessage : InboundMessage
+{
+    public required string Action { get; init; }
+    public required string Id { get; init; }
+    public JsonObject? Spec { get; init; }
 }
 
 /// <summary>
@@ -171,6 +181,7 @@ public static class Inbound
                 "fileDialog" => ParseFileDialog(root),
                 "close" => ParseClose(root),
                 "windowAction" => ParseWindowAction(root),
+                "tray" => ParseTray(root),
                 // 新增 op 不算不兼容变更，旧端遇到新消息应当忽略而不是终止会话。
                 // 字段缺失/类型错误走 bad-protocol：回一条 error 后跳过这一行，
                 // 同样不终止——消息逐行分帧，坏一行不影响下一行。
@@ -243,6 +254,15 @@ public static class Inbound
             : null,
     };
 
+    private static TrayMessage ParseTray(JsonElement e) => new()
+    {
+        Action = RequireString(e, "action"),
+        Id = RequireString(e, "id"),
+        Spec = e.TryGetProperty("spec", out var spec) && spec.ValueKind == JsonValueKind.Object
+            ? ToJsonObject(spec)
+            : null,
+    };
+
     private static WindowActionMessage ParseWindowAction(JsonElement e) => new()
     {
         Session = TryString(e, "session") ?? "main",
@@ -295,6 +315,7 @@ public static class Inbound
 
     private static DialogMessage ParseDialog(JsonElement e) => new()
     {
+        Session = TryString(e, "session") ?? "main",
         Title = TryString(e, "title") ?? "提示",
         Body = TryString(e, "body") ?? "",
         Kind = TryString(e, "kind"),
@@ -316,6 +337,7 @@ public static class Inbound
 
         return new FileDialogMessage
         {
+            Session = TryString(e, "session") ?? "main",
             Id = RequireString(e, "id"),
             Mode = mode,
             Title = TryString(e, "title"),

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar, Iterable
 
+from . import protocol
 from .widgets import Widget
 
 
@@ -786,6 +787,82 @@ class Viewport3D(Widget):
         super().__init__(master, **kwargs)
 
 
+class TrayIcon:
+    """系统托盘图标。
+
+    ::
+
+        tray = ui.TrayIcon("main", icon="C:/path/to/app.ico", tooltip="我的应用")
+        tray.on_click(lambda e: print("clicked"))
+        tray.on_right_click(lambda e: print("right clicked"))
+        tray.destroy()
+
+    ``icon`` 是 .ico 文件的路径。不传时显示空白图标（仍可点）。
+    点击回调收到的事件 ``data`` 是空字典。
+    """
+
+    def __init__(
+        self,
+        icon_id: str = "main",
+        *,
+        icon: str | None = None,
+        tooltip: str | None = None,
+        app: Any | None = None,
+    ):
+        self._app = app if app is not None else _default_app()
+        self._id = icon_id
+        self._spec: dict[str, Any] = {}
+        if icon is not None:
+            self._spec["icon"] = icon
+        if tooltip is not None:
+            self._spec["tooltip"] = tooltip
+        self._handlers: dict[str, Any] = {}
+        self._app._register_tray(self)
+        self._app._host_send(protocol.tray("create", self._id, self._spec))
+
+    def update(self, *, icon: str | None = None, tooltip: str | None = None) -> None:
+        spec: dict[str, Any] = {}
+        if icon is not None:
+            spec["icon"] = icon
+        if tooltip is not None:
+            spec["tooltip"] = tooltip
+        self._spec.update(spec)
+        self._app._host_send(protocol.tray("update", self._id, spec))
+
+    def destroy(self) -> None:
+        self._app._unregister_tray(self._id)
+        self._app._host_send(protocol.tray("destroy", self._id))
+
+    def on_click(self, handler: Any) -> None:
+        self._bind("click", handler)
+
+    def on_double_click(self, handler: Any) -> None:
+        self._bind("doubleClick", handler)
+
+    def on_right_click(self, handler: Any) -> None:
+        self._bind("rightClick", handler)
+
+    def on_middle_click(self, handler: Any) -> None:
+        self._bind("middleClick", handler)
+
+    def _bind(self, what: str, handler: Any) -> None:
+        handler_id = self._app._register_handler(handler)
+        self._handlers[what] = handler_id
+
+    def _dispatch(self, what: str) -> None:
+        handler_id = self._handlers.get(what)
+        if not handler_id:
+            return
+        handler = self._app._handlers.get(handler_id)
+        if handler:
+            handler(None)
+
+
+def _default_app() -> Any:
+    from .app import App
+    return App.default()
+
+
 __all__ = [
     "NumberBox",
     "PasswordBox",
@@ -832,4 +909,5 @@ __all__ = [
     "Polyline",
     "Canvas2D",
     "Viewport3D",
+    "TrayIcon",
 ]
