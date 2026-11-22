@@ -147,6 +147,10 @@ class Widget:
 
     def _apply_variable(self, variable: Any, value: Any) -> None:
         """变量被 set 时，把值写进控件属性。"""
+        # 已销毁的控件即使还被变量引用（例如别处漏了 detach），
+        # 也绝不能再发针对不存在节点的 patch
+        if self._destroyed:
+            return
         prop = self._var_prop
         if prop is None:
             return
@@ -498,8 +502,24 @@ class Widget:
         if self._destroyed:
             return
         self._destroyed = True
+
+        # 先递归销毁子节点：每个子节点会自己注销 handler / 解绑变量
         for child in list(self._children):
             child.destroy()
+
+        # 事件回调常捕获外部大对象（窗口、图片、整个模型），不注销就会
+        # 一直挂在 App._handlers 上。动态列表反复增删时这是主要泄漏源。
+        for handler_id in self._handler_ids.values():
+            self._app._unregister_handler(handler_id)
+        self._handler_ids.clear()
+        self._events.clear()
+
+        # 变量持有 widget 强引用；不解绑的话 var.set() 仍会遍历到这个
+        # 已移除的节点，发出针对不存在节点的 patch（unknown-node 警告）。
+        if self._variable is not None:
+            self._variable._detach(self)
+            self._variable = None
+
         self._app._send_patch([protocol.op_remove(self._id)])
         self._app._unregister_node(self._id)
         if self._parent is not None:

@@ -13,7 +13,7 @@ public static class Wire
     public const int Version = 1;
 
     /// <summary>宿主标识，用于 ready 消息。</summary>
-    public const string HostId = "PyWinUI.Host/0.2.2";
+    public const string HostId = "PyWinUI.Host/0.2.5";
 
     /// <summary>单行消息字节上限。超过即视为异常流量。</summary>
     public const int MaxLineBytes = 8 * 1024 * 1024;

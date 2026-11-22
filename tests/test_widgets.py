@@ -253,5 +253,51 @@ class TestPatchGeneration(WidgetTestCase):
         self.assertEqual([m["op"] for m in self.host.sent], ["patch", "invoke"])
 
 
+class TestDestroyCleanup(WidgetTestCase):
+    """回归：destroy 曾只发 remove，不注销 handler、不解绑变量。"""
+
+    def settle(self) -> None:
+        self.app._flush_patches()
+        self.host.sent.clear()
+
+    def test_destroy_unregisters_handlers(self):
+        btn = ui.Button(self.win, "x")
+        btn.bind("click", lambda e: None)
+        btn.bind("pointerEntered", lambda e: None)
+        ids = list(btn._handler_ids.values())
+        self.assertTrue(all(h in self.app._handlers for h in ids))
+
+        btn.destroy()
+
+        self.assertFalse(any(h in self.app._handlers for h in ids))
+        self.assertEqual(btn._handler_ids, {})
+        self.assertEqual(btn._events, {})
+
+    def test_destroy_detaches_variable_and_stops_patches(self):
+        var = ui.StringVar("a")
+        entry = ui.Entry(self.win, variable=var)
+        self.assertIn(entry, var._widgets)
+
+        entry.destroy()
+        self.assertNotIn(entry, var._widgets)
+
+        self.settle()
+        before = len(self.host.sent)
+        var.set("b")  # 不应再向已移除节点发 patch
+        self.settle()
+        self.assertEqual(len(self.host.sent), before)
+
+    def test_destroy_recurses_to_children(self):
+        row = ui.Row(self.win)
+        child = ui.Button(row, "x")
+        child.bind("click", lambda e: None)
+        handler_ids = list(child._handler_ids.values())
+
+        row.destroy()
+
+        self.assertNotIn(child._id, self.app._nodes)
+        self.assertFalse(any(h in self.app._handlers for h in handler_ids))
+
+
 if __name__ == "__main__":
     unittest.main()

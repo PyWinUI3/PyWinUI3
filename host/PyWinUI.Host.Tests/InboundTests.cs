@@ -131,11 +131,28 @@ public sealed class InboundTests
 
         Assert.Equal("m1", msg.Id);
         Assert.Equal("n1", msg.Node);
+        Assert.Equal("main", msg.Session);
         Assert.True(msg.Notify);
         Assert.Equal(2, msg.Program.Count);
         Assert.Equal("set", (string?)msg.Program[0]!["i"]);
         Assert.Equal(0.5, (double?)msg.Program[0]!["props"]!["opacity"]);
         Assert.Equal(16, (int?)msg.Program[1]!["ms"]);
+    }
+
+    [Fact]
+    public void Parse_Micro_PreservesSession()
+    {
+        // 回归：ParseMicro 曾漏解析 session，导致非 main 窗口的动画
+        // 全被路由到 main 的 MicroRuntime（找不到节点或写错节点）。
+        var msg = Assert.IsType<MicroMessage>(Inbound.Parse("""
+            {
+              "op": "micro", "id": "m2", "node": "n9", "session": "w1",
+              "program": [ { "i": "set", "props": { "opacity": 0.5 } } ]
+            }
+            """));
+
+        Assert.Equal("w1", msg.Session);
+        Assert.Equal("n9", msg.Node);
     }
 
     [Fact]
