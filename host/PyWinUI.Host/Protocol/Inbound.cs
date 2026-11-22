@@ -306,6 +306,9 @@ public static class Inbound
 
         return new MicroMessage
         {
+            // micro 必须按会话路由：非 main 窗口的节点只能由它自己的
+            // MicroRuntime 执行，否则找不到节点，甚至错写到 main 的同名节点。
+            Session = TryString(e, "session") ?? "main",
             Id = id,
             Node = node,
             Program = program,

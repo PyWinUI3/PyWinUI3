@@ -25,13 +25,5 @@ python/pywinui3/runtime/
 Thumbs.db
 *.log
 
-# ---- 项目内工作目录 ----
-# 截图、临时脚本、会话记忆都在这里，不进版本库
-.workbuddy/
-
-# ---- 内部规划文档 ----
-# 本地保留，不随仓库公开
-PLAN.md
-
 # ---- 示例运行时产物 ----
 examples/*_result.txt

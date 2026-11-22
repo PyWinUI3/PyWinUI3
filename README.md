@@ -10,8 +10,8 @@ JSON Lines。`mainloop()` 的语义与 tkinter 一致；宿主崩溃不会带走
 | **平台** | Windows 10 19041 (2004) 及以上 |
 | **Python** | 3.10+，仅标准库，零第三方依赖 |
 | **协议** | [docs/protocol.md](docs/protocol.md) 是唯一权威定义 |
-| **能力** | 58 种控件、query/result 同步读回、micro 微代码、键盘/焦点/拖放/窗口状态事件 |
-| **版本 / 许可** | 0.2.2 · GPL-3.0-only |
+| **能力** | 多窗口、系统托盘、Win2D 画布、D3D11 三维视口、query/result 同步读回、micro 微代码、键盘/焦点/拖放/窗口状态事件 |
+| **版本 / 许可** | 0.2.5 · GPL-3.0-only |
 
 ```python
 import pywinui3 as ui
@@ -57,7 +57,7 @@ win.mainloop()
 **从 release 安装**（推荐；仅 Windows，需要 Python 3.10+）：
 
 ```powershell
-pip install https://github.com/SystenGames/PyWinUI3/releases/download/v0.2.4/pywinui3-0.2.4-py3-none-win_amd64.whl
+pip install https://github.com/SystenGames/PyWinUI3/releases/download/v0.2.5/pywinui3-0.2.5-py3-none-win_amd64.whl
 ```
 
 这是当前已发布的版本；发布新版本后把两处版本号一起换成新标签。包**没有发布到 PyPI**，只能从这里装。
@@ -941,7 +941,9 @@ viewport = ui.Viewport3D(
 - **`place()` 不实现**。WinUI 没有绝对定位，调用会抛 `NotImplementedError`。
 - **Windows 10 上部分视觉效果降级**。Mica 背景、控件圆角需要 Windows 11，宿主按能力位
   自动回落（Acrylic 或纯色）。
-- **单窗口**。一个宿主进程对应一个窗口，多窗口（`Toplevel`）尚未支持。
+- **多窗口是平级窗口**。`Window(session="x")` 可开多扇窗，每扇有独立控件树与事件；
+  但 `Window` 不能作为 XAML 元素嵌进另一扇窗，没有 tkinter 那种父子 `Toplevel` 层级。
+  对话框按会话串行，同一扇窗同时只能弹一个。
 - **窗口没有尺寸上限**。`AppWindow` 不提供 `maxWidth` / `maxHeight`，只能靠 Win32 子类化
   拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
 - **关闭事件不可取消**。`closing` 只是通知，拦不住关窗；需要「确认退出」请在界面里做。
@@ -972,8 +974,8 @@ viewport = ui.Viewport3D(
   `ItemsView` 近似，后者需要自己接 `SwapChainPanel` + DirectX。
 - **WebView2 依赖系统运行时**。只覆盖「运行时未安装」这一种失败；运行时存在但初始化失败
   （安装损坏）时该区域仍可能空白。`navigate_to_string()` 的页面没有真实地址。
-  `WebResourceRequested` 拦截、`addHostObjectToScript`、证书 / HTTP 认证、完整多窗口尚未
-  实现；`permissionRequested` 未接；WinUI 3 不暴露程序化 `zoomFactor`。
+  `WebResourceRequested` 拦截、`addHostObjectToScript`、证书 / HTTP 认证尚未
+  实现；网页里的 `window.open()` 新窗口也不接管（框架本身的多窗口见 6.11 节）；`permissionRequested` 未接；WinUI 3 不暴露程序化 `zoomFactor`。
 
 ---
 
