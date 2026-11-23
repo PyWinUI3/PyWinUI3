@@ -245,6 +245,59 @@ Python 侧 `App.query()` 是阻塞式的：等到配对结果才返回，等待�
 
 对话框会阻塞窗口交互，适合演示与调试，不适合当通知用——生产场景请用界面内的状态文字。
 
+#### `fileDialog` — 文件 / 文件夹选择
+
+带请求 id，宿主回一条 `fileDialogResult` 配对——`invoke` 只能单向做事，而文件选择
+必须把用户选中的路径带回来。
+
+```json
+{
+  "op": "fileDialog",
+  "id": "fd1",
+  "mode": "openMultiple",
+  "title": "请选择文件",
+  "initialDir": "D:/docs",
+  "filter": "文本 (*.txt)|*.txt",
+  "defaultName": "report.txt"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | string | 是 | 请求 id，回包原样带回 |
+| `mode` | string | 是 | `open` / `openMultiple` / `save` / `folder`，其他值回 `bad-protocol` |
+| `title` / `initialDir` / `filter` / `defaultName` | string | 否 | 对话框外观参数 |
+
+宿主优先用系统 `IFileDialog` COM（支持自定义标题和初始目录），不可用时回退 WinRT
+picker（标题被忽略）。用户取消时回 `ok=false`，`paths` 为空。
+
+#### `windowAction` — 单扇窗口的控制
+
+只影响一个会话窗口；和 `close` 不同，它不结束整个宿主。
+
+```json
+{ "op": "windowAction", "session": "w1", "action": "hide" }
+```
+
+`action` 取 `hide` / `show` / `focus` / `close` / `minimize` / `maximize` / `restore` /
+`activate` / `start_move`。每个会话串行处理。
+
+#### `tray` — 系统托盘图标
+
+```json
+{ "op": "tray", "action": "create", "id": "app",
+  "spec": { "icon": "C:/app.ico", "tooltip": "我的应用" } }
+```
+
+| 字段 | 说明 |
+|---|---|
+| `action` | `create` / `update` / `destroy` |
+| `id` | 图标 id，后续 `update` / `destroy` 用它定位 |
+| `spec` | 可选，图标路径、提示文字等 |
+
+托盘点击通过 `trayEvent` 回传。宿主复用主窗口句柄挂 WndProc 子类接收，不需要额外消息循环；
+进程退出时会自动清理所有图标。
+
 #### `close` — 关闭
 
 ```json
@@ -308,8 +361,8 @@ Python 侧 `App.query()` 是阻塞式的：等到配对结果才返回，等待�
 
 #### 未知 `op` 与字段校验
 
-`op` 不在已知集合（`hello` / `render` / `patch` / `invoke` / `query` / `dialog` / `close` /
-`micro`）里时，宿主解析成 `UnknownMessage`，回一条 `warning` 后**忽略，不终止会话**——
+`op` 不在已知集合（`hello` / `render` / `patch` / `invoke` / `query` / `dialog` /
+`fileDialog` / `windowAction` / `tray` / `close` / `micro`）里时，宿主解析成 `UnknownMessage`，回一条 `warning` 后**忽略，不终止会话**——
 新版本 Python 往旧宿主发新 `op` 不会把连接打断。字段缺失 / 类型错误回 `bad-protocol`，但
 **同样不终止会话**：消息是逐行分帧的，坏一行不影响下一行，跳过并继续即可。旧实现把它当
 致命错误，结果是一个字段写错整窗消失。现在只有 `version-mismatch` 还会终止——两端对协议
@@ -391,6 +444,32 @@ Python 侧据此抑制双向绑定回环。
 **仅当 `micro` 请求带 `notify=true` 时回**。程序正常跑完 `ok=true`；形状校验失败或目标节点
 不存在时 `ok=false` 并在 `error` 里给原因。没有 `notify` 的请求不发这条，避免每帧一条回包。
 
+#### `fileDialogResult` — 文件对话框应答
+
+```json
+{ "t": "fileDialogResult", "id": "fd1", "ok": true,
+  "paths": ["D:/docs/a.txt"], "session": null }
+```
+
+`ok=false` 表示用户取消（`error` 给出原因）；`paths` 在 `openMultiple` 下可以是多项，
+其他模式恒为 1 项或空。
+
+#### `windowClosed` — 某个会话窗口关闭
+
+```json
+{ "t": "windowClosed", "session": "w1", "code": 0 }
+```
+
+只影响那一扇窗，宿主继续运行；`main` 会话关闭则整个宿主退出并回 `bye`。
+
+#### `trayEvent` — 托盘图标被点击
+
+```json
+{ "t": "trayEvent", "id": "app", "event": "rightClick" }
+```
+
+`event` 取 `click` / `doubleClick` / `rightClick` / `middleClick`。
+
 #### `warning` — 告警
 
 ```json
@@ -446,11 +525,24 @@ Python 侧据此抑制双向绑定回环。
 | `scroll` | bool | `true` | 窗口内容可滚动；关掉后超出部分被裁切 |
 | `theme` | string | `"system"` | `system` / `light` / `dark` |
 | `backdrop` | string | `"auto"` | `auto` / `mica` / `acrylic` / `none` |
+| `parent` | string | — | 父窗口的会话 id。给了就嵌成 WS_CHILD 子窗口，不再是独立顶层窗口 |
+| `layer` | string | `highest` | 嵌入子窗口的 z 序：`highest` / `lowest`。TOPMOST 对 WS_CHILD 无效，不开放 |
+| `maximizeRequestable` | bool | `false` | 是否启用标题栏最大化按钮并把它交给 Python 回调。**默认禁用**，见下方说明 |
 
 窗口尺寸上限（`maxWidth` / `maxHeight`）没有对应字段：`AppWindow` 不提供这个能力，只能靠
 Win32 子类化拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
 
 `backdrop: "auto"` 由宿主按能力挑：有 Mica 用 Mica，否则 Acrylic，再否则纯色。
+
+`parent` / `layer` 只对**顶层父窗口**有效——父必须是顶层窗口，不能是另一个子窗口。
+子窗口的层级只有两档，对应子 HWND 唯一有效的两个 z 序位置：`highest` = `HWND_TOP`，
+`lowest` = `HWND_BOTTOM`。
+
+`maximizeRequestable` 默认为 `false`：宿主不自己决定要不要最大化，标题栏上的最大化按钮
+**禁用**（灰着、不响应点击和双击）。Python 侧调用 `win.on_maximize_request(cb)` 时，会通过
+`patch` 的 `window` 操作把这一位置成 `true`；之后点按钮，宿主发 `maximizeRequested` 事件
+（带 `data.maximized` 表示当前状态），由回调自己决定调 `maximize()` 还是 `restore()`。
+`on_maximize_request(None)` 会把它改回 `false`。
 
 ### 3.2 Node
 
@@ -1192,7 +1284,21 @@ null。这些读取全部在 UI 线程同步完成，因此 `query` 里不能放
 - Slider / ProgressBar → `{ "value": 42.0 }`
 - ComboBox / ListBox → `{ "index": 1, "value": "..." }`
 
-### 4.2 回声抑制
+### 4.2 窗口标题栏事件
+
+| 事件名 | 触发时机 | `data` |
+|---|---|---|
+| `closeRequested` | 用户点标题栏关闭按钮 | `null` |
+| `maximizeRequested` | 用户点标题栏最大化/还原按钮，或双击标题栏 | `{"maximized": bool}` 表示当前是否最大化 |
+
+这两条事件**只发给对应会话的根节点**，且不受节点的 `events` 映射影响——Python 侧由
+`Window.on_close_request()` / `Window.on_maximize_request()` 专门接管：
+
+- `closeRequested`：没注册回调时默认直接关窗；注册后可以拦下来询问用户。
+- `maximizeRequested`：没注册回调时按钮是**禁用**的，根本收不到事件；
+  注册后由回调自己决定最大化还是还原（见 3.1 节的 `maximizeRequestable`）。
+
+### 4.3 回声抑制
 
 Python 侧 `entry.configure(text="x")` 会触发宿主的 TextChanged，宿主无法区分「用户输入」与
 「程序赋值」。
@@ -1218,6 +1324,7 @@ Python: 收到 echo 事件 → 同步变量 → 不调用 on_change
 | `version-mismatch` | 协议版本不兼容 | **是** |
 | `unknown-type` | 未知控件类型 | 否 |
 | `unknown-node` | 引用了不存在的节点 id | 否 |
+| `unknown-session` | 引用了不存在的会话 id | 否 |
 | `bad-property` | 属性值无法解析 | 否 |
 | `bad-op` | 未知的 patch 操作 | 否 |
 | `bad-micro` | `micro` 形状校验失败 | 否 |

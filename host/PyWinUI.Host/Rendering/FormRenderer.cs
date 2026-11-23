@@ -1,10 +1,15 @@
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Nodes;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
+using WinRT.Interop;
 using PyWinUI.Host.Interop;
 using PyWinUI.Host.Protocol;
 using Windows.Graphics;
@@ -336,12 +341,605 @@ internal sealed class FormRenderer
 
         // 整窗滚动默认开启。包在这一层是刻意的：只有窗口内容区的高度是有界的，
         // 放进 StackPanel 里的 ScrollViewer 会被测量成无限高，永远不滚。
-        _window.Content = message.Window.Scroll == false ? root : WrapForScroll(root);
+        var content = message.Window.Scroll == false ? root : WrapForScroll(root);
+
+        // 所有窗口共用同一个外壳（自绘标题栏 + 内容区），这里只替换内容区。
+        // 标题栏不跟着控件树重建，否则每次 render 都会把拖动/悬停状态重置掉。
+        EnsureShell();
+        _contentHost!.Children.Clear();
+        _contentHost.Children.Add(content);
         HostLog.Write("[render] window sized + content swapped");
 
         ApplyTheme(_pendingTheme);
         HostLog.Write("[render] done");
         return true;
+    }
+
+    /// <summary>标题栏高度（DIP），与系统标题栏一致。</summary>
+    private const int TitleBarHeight = WindowChrome.TitleBarHeight;
+
+    /// <summary>窗口圆角半径（DIP）。</summary>
+    /// <summary>自绘窗口圆角半径（父窗口、子窗口共用）。</summary>
+    private const int WindowCornerRadius = 8;
+
+    /// <summary>窗口外围那圈完全透明的边（宽多少像素）。</summary>
+    private const int WindowTransparentMargin = WindowChrome.TransparentMargin;
+
+    /// <summary>
+    /// 建好窗口外壳（自绘标题栏 + 内容区），只建一次。
+    ///
+    /// 用常驻外壳而不是每次 render 重新包一层，是因为标题栏要保留状态：
+    /// 拖动中、按钮悬停、最大化图标，这些都不该被一次内容刷新打断。
+    /// </summary>
+    private void EnsureShell()
+    {
+        if (_shell is not null)
+        {
+            return;
+        }
+
+        _contentHost = new Grid();
+        var bar = BuildTitleBar();
+
+        var shell = new Grid();
+        shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        shell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        Grid.SetRow(bar, 0);
+        Grid.SetRow(_contentHost, 1);
+        shell.Children.Add(bar);
+        shell.Children.Add(_contentHost);
+
+        // 内容容器：白底 + 圆角 + 1px 外框线。
+        var inner = new Border
+        {
+            Background = new SolidColorBrush(ContentBackground()),
+
+            // 这 1px 就是窗口的外框线。
+            //
+            // 两点注意：
+            // - BorderThickness 不能给 0。WinUI 的 Border 是按 border geometry
+            //   画圆角边框的，厚度为 0 会退化成直角（实测外框线整个消失）。
+            // - 这条线跟着 CornerRadius 走，是圆角的，不会变成方形轮廓。
+            BorderBrush = new SolidColorBrush(FrameColor()),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(CornerRadiusForWindow()),
+            Child = shell,
+        };
+
+        // 外围一圈**完全透明**的边。
+        //
+        // 这里只画 Padding、不画任何底色：那一圈区域没有任何像素，
+        // 露出的是 DWM 玻璃层后面的桌面——也就是真正的「透明边框」。
+        // 内容区（inner）的尺寸不受影响，只是整体往里挪。
+        //
+        // 这一层同时把外壳「降」成 Window.Content 的子元素：
+        // 要裁剪圆角只能靠 Composition 的 GeometricClip，而 Clip 设在
+        // Window.Content 上是无效的（那是框架托管的 island 根 visual，
+        // 改动会被框架忽略），所以被裁的 inner 必须是普通元素。
+        var root = new Border
+        {
+            Background = null,
+            Padding = new Thickness(WindowTransparentMargin),
+            Child = inner,
+        };
+
+        _shell = shell;
+        _outerFrame = root;
+        _innerFrame = inner;
+        _window.Content = root;
+
+        // 窗口状态（最大化 / 嵌入）变了就要重算外观
+        UpdateChrome();
+
+        // AppWindow 对**嵌入子窗口**是 null——它已经被 SetParent 改成 WS_CHILD，
+        // WinUI 的 AppWindow 随之失效。这里必须判空，否则子窗口一渲染就
+        // NullReferenceException。
+        var appWindow = _window.AppWindow;
+        if (appWindow is not null)
+        {
+            appWindow.Changed += (_, _) => UpdateChrome();
+        }
+
+        // Border.CornerRadius 只影响它自己背景/边框的绘制，**不会裁剪子元素**。
+        // 客户区铺满整个窗口之后，子元素（内容区的白底、滚动层）会越过圆角
+        // 一直画到窗口四角外面，让"透明圆角"看起来始终有一圈浅色。
+        // 这里用 Composition 的几何裁剪把整棵子树真正裁到圆角内。
+        if (inner.IsLoaded)
+        {
+            AttachRoundedClip(inner);
+        }
+        else
+        {
+            inner.Loaded += (_, _) => AttachRoundedClip(inner);
+        }
+
+        // 标题栏这会儿才建好，把之前收到的状态补上
+        SetMaximizeRequestable(_maximizeRequestable);
+        UpdateInnerBackground();
+
+        // 从窗口属性读实际图标，替换标题栏里的占位字形
+        _ = RefreshTitleIconAsync();
+    }
+
+    /// <summary>
+    /// 从 Win32 窗口属性读实际图标，填进自绘标题栏。
+    ///
+    /// AppWindow.SetIcon 是异步落地的，设置完立刻读可能还是旧图标；
+    /// 所以 ApplyWindowIcon 里也会再调一次来覆盖。
+    /// </summary>
+    private async Task RefreshTitleIconAsync()
+    {
+        if (_titleIcon is null)
+        {
+            return;
+        }
+
+        var hwnd = WindowNative.GetWindowHandle(_window);
+        var source = await WindowIcon.LoadAsync(hwnd, size: 16);
+        if (source is null)
+        {
+            return;
+        }
+
+        var icon = _titleIcon;
+        icon.Source = source;
+    }
+
+    /// <summary>
+    /// 按当前窗口状态重算外观。
+    ///
+    /// 两条规则：
+    /// - **嵌入的子窗口**：不要外围透明边。
+    /// - **最大化**：不要外围透明边，也不要圆角——最大化时窗口就是整块屏幕，
+    ///   再留一圈透明边和圆角会露出屏幕边缘的一线，很怪。
+    /// </summary>
+    private void UpdateChrome()
+    {
+        if (_outerFrame is null || _innerFrame is null)
+        {
+            return;
+        }
+
+        var maximized = IsMaximizedNative();
+
+        var margin = (_embedded || maximized) ? 0 : WindowTransparentMargin;
+        _outerFrame.Padding = new Thickness(margin);
+
+        var radius = CornerRadiusForWindow();
+        _innerFrame.CornerRadius = new CornerRadius(radius);
+
+        if (_clipGeometry is not null)
+        {
+            _clipGeometry.CornerRadius = new Vector2(radius, radius);
+        }
+
+        // 标题栏的上两角圆角也要跟着取消：窗口最大化后是直角铺满屏幕，
+        // 标题栏还留着圆角的话，角上会缺一块，露出底色。
+        if (_titleBarBorder is not null)
+        {
+            _titleBarBorder.CornerRadius = maximized
+                ? new CornerRadius(0)
+                : new CornerRadius(WindowCornerRadius, WindowCornerRadius, 0, 0);
+        }
+
+        // 最大化按钮的图标也在这里统一管。
+        //
+        // 之前靠 Session 在切换最大化时调 SetMaximizedVisual，但**拖动标题栏
+        // 还原**走的是 presenter.Restore()，不经过那条路径，图标就不更新了。
+        // 子窗口的按钮是「折叠/填满」语义，不受最大化影响。
+        if (_maximizeGlyph is not null && !_embedded)
+        {
+            _maximizeGlyph.Glyph = maximized ? "\uE923" : "\uE922";
+        }
+    }
+
+    /// <summary>
+    /// 这扇窗口该用多大的自绘圆角。
+    ///
+    /// - 最大化：0（铺满屏幕，保留圆角会露出屏幕边缘一条缝）。
+    /// - Win11 顶层窗口：0 —— 圆角交给 DWM 画（DWMWCP_ROUND），
+    ///   它带抗锯齿、阴影也对。自绘的同时会叠成双重轮廓，所以让位。
+    /// - 其余（Win10、嵌入子窗口）：自绘 12px。
+    ///   子窗口即使在 Win11 上也得自绘——DWM 的窗口圆角只对顶层有效。
+    /// </summary>
+    private int CornerRadiusForWindow()
+    {
+        if (IsMaximizedNative())
+        {
+            return 0;
+        }
+
+        if (CustomChrome.CanUseSystemCorner(_embedded))
+        {
+            return 0;
+        }
+
+        return WindowCornerRadius;
+    }
+
+    private const int GWL_STYLE = -16;
+    private const long WS_MAXIMIZE = 0x01000000L;
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    /// <summary>从最大化还原成普通窗口。</summary>
+    /// <summary>窗口当前是不是最大化状态。</summary>
+    private bool IsMaximizedNative()
+    {
+        var hwnd = WindowNative.GetWindowHandle(_window);
+        if (hwnd == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        return (GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64() & WS_MAXIMIZE) != 0;
+    }
+
+    /// <summary>外框颜色：深色主题下 25% 灰几乎看不见，提到 75% 才有边界感。</summary>
+    private static Windows.UI.Color FrameColor()
+    {
+        var dark = Application.Current.RequestedTheme == ApplicationTheme.Dark;
+        return dark
+            ? Windows.UI.Color.FromArgb(191, 0x80, 0x80, 0x80)
+            : Windows.UI.Color.FromArgb(64, 0x80, 0x80, 0x80);
+    }
+
+    /// <summary>内容区底色。窗口透明之后这层必须不透明，否则会露出桌面。</summary>
+    private static Windows.UI.Color ContentBackground()
+    {
+        var dark = Application.Current.RequestedTheme == ApplicationTheme.Dark;
+        return dark
+            ? Windows.UI.Color.FromArgb(255, 0x20, 0x20, 0x20)
+            : Windows.UI.Color.FromArgb(255, 0xFF, 0xFF, 0xFF);
+    }
+
+    /// <summary>
+    /// 用 Composition 的圆角几何裁剪根元素——这是 Win10 上唯一能抗锯齿的做法。
+    ///
+    /// SetWindowRgn 是二值掩码，边缘只能是硬边；Composition 几何裁剪按像素覆盖率
+    /// 计算 alpha，边缘平滑。前提是窗口背景透明，四角才能露出后面的东西
+    /// （透明在 App.xaml.cs / Session.CreateWindow 里设置）。
+    /// </summary>
+    private void AttachRoundedClip(FrameworkElement target)
+    {
+        var visual = ElementCompositionPreview.GetElementVisual(target);
+        var compositor = visual.Compositor;
+
+        var geometry = compositor.CreateRoundedRectangleGeometry();
+        geometry.CornerRadius = new Vector2(WindowCornerRadius, WindowCornerRadius);
+        geometry.Size = new Vector2(
+            (float)Math.Max(1, target.ActualWidth),
+            (float)Math.Max(1, target.ActualHeight));
+
+        visual.Clip = compositor.CreateGeometricClip(geometry);
+        _clipGeometry = geometry;
+
+        target.SizeChanged += (_, e) =>
+        {
+            geometry.Size = new Vector2(
+                (float)Math.Max(1, e.NewSize.Width),
+                (float)Math.Max(1, e.NewSize.Height));
+        };
+    }
+
+    /// <summary>标题栏：应用图标 + 标题文字 + 最小化 / 最大化 / 关闭。</summary>
+    private FrameworkElement BuildTitleBar()
+    {
+        var glyphColor = Windows.UI.Color.FromArgb(255, 0x1A, 0x1A, 0x1A);
+        var whiteColor = Windows.UI.Color.FromArgb(255, 0xFF, 0xFF, 0xFF);
+        var clearGray = Windows.UI.Color.FromArgb(0, 0xE5, 0xE5, 0xE5);
+        var clearRed = Windows.UI.Color.FromArgb(0, 0xC4, 0x2B, 0x1C);
+        var hoverGray = Windows.UI.Color.FromArgb(255, 0xE5, 0xE5, 0xE5);
+        var pressedGray = Windows.UI.Color.FromArgb(255, 0xCC, 0xCC, 0xCC);
+        var hoverRed = Windows.UI.Color.FromArgb(255, 0xC4, 0x2B, 0x1C);
+        var pressedRed = Windows.UI.Color.FromArgb(255, 0xF1, 0x70, 0x7A);
+
+        // ---- 左侧：窗口图标 + 标题 ----
+        //
+        // 图标从 Win32 窗口属性里读（WM_GETICON / 类默认图标），不是写死的
+        // Segoe 字形——那样设了 icon= 也只在任务栏生效，标题栏一个样。
+        // WindowIcon.LoadAsync 是异步的，先放占位字形，拿到图标再替换。
+        var icon = new Microsoft.UI.Xaml.Controls.Image
+        {
+            Width = 16,
+            Height = 16,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 8, 0),
+            Stretch = Microsoft.UI.Xaml.Media.Stretch.Uniform,
+        };
+        _titleIcon = icon;
+
+        _titleText = new TextBlock
+        {
+            Text = _window.Title,
+            FontSize = 12,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Foreground = new SolidColorBrush(glyphColor),
+        };
+
+        var left = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        left.Children.Add(icon);
+        left.Children.Add(_titleText);
+
+        // ---- 右侧按钮 ----
+        // 最小化图标随折叠状态切换：子窗口折叠后显示「还原」
+        var minimizeGlyph = new FontIcon
+        {
+            Glyph = Embedded && EmbeddedCollapsed ? "\uE923" : "\uE921",
+            FontSize = 10,
+            Foreground = new SolidColorBrush(glyphColor),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        _minimizeGlyph = minimizeGlyph;
+        var minimizeBox = CreateBarButton(
+            minimizeGlyph, clearGray, hoverGray, pressedGray,
+            () => MinimizeButtonPressed?.Invoke());
+
+        var maximizeGlyph = new FontIcon
+        {
+            Glyph = "\uE922",
+            FontSize = 10,
+            Foreground = new SolidColorBrush(glyphColor),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        _maximizeGlyph = maximizeGlyph;
+        var maximizeBox = CreateBarButton(
+            maximizeGlyph, clearGray, hoverGray, pressedGray,
+            () =>
+            {
+                // 没挂 Python 回调之前，最大化按钮是禁用的
+                if (_maximizeRequestable)
+                {
+                    MaximizeButtonPressed?.Invoke();
+                }
+            });
+        _maximizeBox = maximizeBox;
+
+        // 关闭是唯一会变红的：悬停红底白叉
+        var closeGlyph = new FontIcon
+        {
+            Glyph = "\uE8BB",
+            FontSize = 10,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var closeBackground = new SolidColorBrush(clearRed);
+        var closeGlyphBrush = new SolidColorBrush(glyphColor);
+        closeGlyph.Foreground = closeGlyphBrush;
+
+        var closeBox = new Border
+        {
+            Width = 46,
+            Height = TitleBarHeight,
+            Background = closeBackground,
+            Child = closeGlyph,
+        };
+        closeBox.PointerEntered += (_, _) =>
+        {
+            FadeBrush(closeBackground, hoverRed);
+            FadeBrush(closeGlyphBrush, whiteColor);
+        };
+        closeBox.PointerExited += (_, _) =>
+        {
+            FadeBrush(closeBackground, clearRed);
+            FadeBrush(closeGlyphBrush, glyphColor);
+        };
+        closeBox.PointerPressed += (_, e) =>
+        {
+            e.Handled = true;
+            FadeBrush(closeBackground, pressedRed);
+        };
+        closeBox.PointerReleased += (_, e) =>
+        {
+            e.Handled = true;
+            FadeBrush(closeBackground, hoverRed);
+            CloseButtonPressed?.Invoke();
+        };
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Stretch,
+        };
+        buttons.Children.Add(minimizeBox);
+        buttons.Children.Add(maximizeBox);
+        buttons.Children.Add(closeBox);
+
+        var inner = new Grid { Padding = new Thickness(12, 0, 0, 0) };
+        inner.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        inner.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(left, 0);
+        Grid.SetColumn(buttons, 1);
+        inner.Children.Add(left);
+        inner.Children.Add(buttons);
+
+        var bar = new Border
+        {
+            Height = TitleBarHeight,
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xFF, 0xFF, 0xFF)),
+            CornerRadius = new CornerRadius(WindowCornerRadius, WindowCornerRadius, 0, 0),
+            Child = inner,
+        };
+
+        // ---- 拖动 ----
+        // 手动指针驱动：系统移动循环要求调用时左键已按下，从 PointerPressed 里
+        // 喂进去时机总差一拍。捕获指针是为了拖出标题条后仍能继续收到移动事件。
+        bar.PointerPressed += (_, e) =>
+        {
+            e.Handled = true;
+
+            // 最大化状态下拖标题栏 = 先还原再拖，由 BeginDrag 负责
+            // （它还原后会把窗口挪到光标位置，避免拖动时跳一下）。
+
+            _draggingTitleBar = true;
+            bar.CapturePointer(e.Pointer);
+
+            // 记下指针在标题栏里的位置。从最大化还原时，要把标题栏上
+            // 「按下的那个点」对回鼠标底下，所以这个坐标得留一份。
+            var point = e.GetCurrentPoint(bar).Position;
+            EmbeddedWindow.BeginDrag(_window, point.X, point.Y);
+        };
+        bar.PointerMoved += (_, _) =>
+        {
+            if (_draggingTitleBar)
+            {
+                EmbeddedWindow.UpdateDrag(_window);
+            }
+        };
+        bar.PointerReleased += (_, e) =>
+        {
+            if (!_draggingTitleBar)
+            {
+                return;
+            }
+
+            _draggingTitleBar = false;
+            bar.ReleasePointerCapture(e.Pointer);
+            EmbeddedWindow.EndDrag(_window);
+        };
+        bar.PointerCaptureLost += (_, _) =>
+        {
+            _draggingTitleBar = false;
+            EmbeddedWindow.EndDrag(_window);
+        };
+
+        // 双击标题栏 = 最大化 / 还原，和系统标题栏一致
+        bar.DoubleTapped += (_, e) =>
+        {
+            e.Handled = true;
+
+            if (_maximizeRequestable)
+            {
+                MaximizeButtonPressed?.Invoke();
+            }
+        };
+
+        _titleBarBorder = bar;
+
+        return bar;
+    }
+
+    /// <summary>标题栏上的普通按钮（最小化 / 最大化同款）：透明底，悬停浅灰。</summary>
+    private static Border CreateBarButton(
+        FontIcon glyph,
+        Windows.UI.Color clear,
+        Windows.UI.Color hover,
+        Windows.UI.Color pressed,
+        Action onClick)
+    {
+        var background = new SolidColorBrush(clear);
+        var box = new Border
+        {
+            Width = 46,
+            Height = TitleBarHeight,
+            Background = background,
+            Child = glyph,
+        };
+
+        box.PointerEntered += (_, _) => FadeBrush(background, hover);
+        box.PointerExited += (_, _) => FadeBrush(background, clear);
+        box.PointerPressed += (_, e) =>
+        {
+            e.Handled = true;
+            FadeBrush(background, pressed);
+        };
+        box.PointerReleased += (_, e) =>
+        {
+            e.Handled = true;
+            FadeBrush(background, clear);
+            onClick();
+        };
+
+        return box;
+    }
+
+    /// <summary>
+    /// 启用 / 禁用标题栏上的最大化按钮。
+    ///
+    /// 只有 Python 那边挂了最大化回调才启用——没挂就不给点。
+    /// </summary>
+    public void SetMaximizeRequestable(bool requestable)
+    {
+        _maximizeRequestable = requestable;
+
+        if (_maximizeBox is null)
+        {
+            return;
+        }
+
+        _maximizeBox.Opacity = requestable ? 1.0 : 0.3;
+        _maximizeBox.IsHitTestVisible = requestable;
+    }
+
+    /// <summary>最大化 / 还原状态变化时切图标。</summary>
+    public void SetMaximizedVisual(bool maximized)
+    {
+        if (_maximizeGlyph is not null)
+        {
+            _maximizeGlyph.Glyph = maximized ? "\uE923" : "\uE922";
+        }
+    }
+
+    /// <summary>标题文字联动，供 configure(title=...) 之后调用。</summary>
+    public void SetTitleVisual(string title)
+    {
+        if (_titleText is not null)
+        {
+            _titleText.Text = title;
+        }
+    }
+
+
+    /// <summary>
+    /// 每个 brush 复用一个 Storyboard。
+    ///
+    /// 为什么要复用而不是每次新建：
+    /// 1. 新建的 Storyboard 只放在局部变量里，方法返回就可能被 GC 回收，
+    ///    动画停在半路——看起来就是"淡到一半不动"；
+    /// 2. 同一属性上跑着两条 Storyboard 会互相抢写，快速进出时颜色会抖。
+    /// 复用一个、每次 Stop 后重设 From/To 再 Begin，两个问题一起没了。
+    /// </summary>
+    private static readonly Dictionary<SolidColorBrush, Storyboard> BrushAnimations = new();
+
+    /// <summary>
+    /// 把 brush 的颜色补间到目标色（默认 200ms，对齐系统标题栏按钮的过渡感）。
+    ///
+    /// 必须开 <c>EnableDependentAnimation</c>：ColorAnimation 走 UI 线程逐帧计算，
+    /// 不开这个开关 WinUI 会静默忽略整条动画——看起来像"没生效"，实际上是被拦掉了。
+    ///
+    /// <c>From</c> 取 brush 当前颜色：动画没播完就再次触发（悬停没结束就移出），
+    /// 会从"此刻屏幕上的颜色"接着补间，而不是跳回起点。
+    /// </summary>
+    private static void FadeBrush(SolidColorBrush brush, Windows.UI.Color to, int milliseconds = 200)
+    {
+        if (!BrushAnimations.TryGetValue(brush, out var storyboard))
+        {
+            var created = new ColorAnimation { EnableDependentAnimation = true };
+            Storyboard.SetTarget(created, brush);
+            Storyboard.SetTargetProperty(created, "Color");
+
+            storyboard = new Storyboard();
+            storyboard.Children.Add(created);
+            BrushAnimations[brush] = storyboard;
+        }
+
+        var animation = (ColorAnimation)storyboard.Children[0];
+
+        // 同一帧内停掉再重设，回弹不可见
+        storyboard.Stop();
+        animation.From = brush.Color;
+        animation.To = to;
+        animation.Duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
+        storyboard.Begin();
     }
 
     private void Reset()
@@ -814,6 +1412,118 @@ internal sealed class FormRenderer
     // 窗口
     // ==================================================================
 
+    /// <summary>
+    /// true 表示这扇窗已经被嵌成父窗口的 WS_CHILD 子窗口，
+    /// 几何由 EmbeddedWindow 用 SetWindowPos 管，渲染层不能再 Resize 或动 presenter。
+    /// </summary>
+    /// <summary>
+    /// 嵌入的子窗口（WS_CHILD）。
+    ///
+    /// 子窗口不需要外围那圈透明边：它没有 DWM 那一套，边框留着只是白占地方。
+    /// </summary>
+    public bool Embedded
+    {
+        get => _embedded;
+        set
+        {
+            _embedded = value;
+            UpdateChrome();
+            UpdateInnerBackground();
+        }
+    }
+
+    /// <summary>
+    /// 窗口外壳自绘的底色。
+    ///
+    /// 子窗口也**要**有不透明的底色：它下面就是父窗口的内容，完全透明的话
+    /// 父窗口的文字会直接透上来（子窗口是 WS_CHILD，永远画在父窗口之上，
+    /// 透明处照样能看见下层）。
+    ///
+    /// 之前那块「矩形白边」不是这里来的，是 **Window 根 Visual** 自带的默认
+    /// 底色——根 Visual 是矩形，不管里面的内容怎么裁都会露出来。
+    /// 那个由 TransparentBackdrop 负责置透明，这里这层照旧自绘圆角白底，
+    /// 两者不冲突：根 Visual 透明（矩形白边没了）+ 这层圆角白底（挡住下层文字）。
+    /// </summary>
+    private void UpdateInnerBackground()
+    {
+        if (_innerFrame is null)
+        {
+            return;
+        }
+
+        _innerFrame.Background = new SolidColorBrush(ContentBackground());
+    }
+
+    /// <summary>嵌入子窗口的自绘标题栏点了关闭，由 Session 决定是发事件还是直接关。</summary>
+    public Action? CloseButtonPressed { get; set; }
+
+    /// <summary>嵌入子窗口的自绘标题栏点了最小化（折叠到父窗口左下角）。</summary>
+    public Action? MinimizeButtonPressed { get; set; }
+
+    /// <summary>标题栏的最大化 / 还原按钮，双击标题栏也走这里。</summary>
+    public Action? MaximizeButtonPressed { get; set; }
+
+    /// <summary>
+    /// 嵌入子窗口当前是否折叠。标题栏的最小化按钮图标据此切换：
+    /// 折叠后变成「还原」，展开时是「最小化」。
+    /// </summary>
+    public bool EmbeddedCollapsed { get; set; }
+
+    /// <summary>标题栏上那个会变的图标（最小化 / 还原二合一）。</summary>
+    private FontIcon? _minimizeGlyph;
+
+    /// <summary>最大化 / 还原二合一的图标。</summary>
+    private FontIcon? _maximizeGlyph;
+
+    /// <summary>标题栏上的标题文字，跟随 Window.Title 更新。</summary>
+    private TextBlock? _titleText;
+
+    /// <summary>窗口外壳：第一行标题栏，第二行内容。只建一次，之后只换内容区。</summary>
+    private Grid? _shell;
+
+    /// <summary>内容区的宿主。控件树替换的是它，标题栏不受影响。</summary>
+    private Grid? _contentHost;
+
+    /// <summary>圆角几何，尺寸变化时同步（Composition 裁剪带抗锯齿）。</summary>
+    private CompositionRoundedRectangleGeometry? _clipGeometry;
+
+    /// <summary>外围透明边那一层。</summary>
+    private Border? _outerFrame;
+
+    /// <summary>真正画内容的容器（白底 + 圆角 + 外框线）。</summary>
+    private Border? _innerFrame;
+
+    /// <summary>自绘标题栏。最大化时要取消它的上两角圆角。</summary>
+    private Border? _titleBarBorder;
+
+    /// <summary>标题栏上的窗口图标。</summary>
+    private Microsoft.UI.Xaml.Controls.Image? _titleIcon;
+
+    /// <summary>标题栏上的最大化按钮（可能要禁用）。</summary>
+    private Border? _maximizeBox;
+
+    /// <summary>
+    /// 最大化是否交给 Python 回调处理。
+    ///
+    /// 没挂回调时按钮是禁用的——宿主不自己决定要不要最大化。
+    /// </summary>
+    private bool _maximizeRequestable;
+
+    private bool _embedded;
+
+    /// <summary>标题栏是否正在被拖动（指针事件驱动，不用系统移动循环）。</summary>
+    private bool _draggingTitleBar;
+
+    /// <summary>切换最小化按钮的图标外观。</summary>
+    public void SetCollapsedVisual(bool collapsed)
+    {
+        EmbeddedCollapsed = collapsed;
+        if (_minimizeGlyph is not null)
+        {
+            _minimizeGlyph.Glyph = collapsed ? "\uE923" : "\uE921";
+        }
+    }
+
     private void ApplyWindowProps(JsonObject? props)
     {
         if (props is null)
@@ -834,6 +1544,7 @@ internal sealed class FormRenderer
             Y = ValueParsers.AsDouble(props["y"]),
             Icon = ValueParsers.AsString(props["icon"]),
             AlwaysOnTop = ValueParsers.AsBool(props["alwaysOnTop"]),
+            MaximizeRequestable = ValueParsers.AsBool(props["maximizeRequestable"]),
             Minimizable = ValueParsers.AsBool(props["minimizable"]),
             Maximizable = ValueParsers.AsBool(props["maximizable"]),
             Maximized = ValueParsers.AsBool(props["maximized"]),
@@ -857,6 +1568,25 @@ internal sealed class FormRenderer
             if (!string.IsNullOrEmpty(spec.Title))
             {
                 _window.Title = spec.Title;
+            }
+
+            // 最大化是否交给 Python 回调——没挂回调就把按钮禁用。
+            if (spec.MaximizeRequestable is { } requestable)
+            {
+                SetMaximizeRequestable(requestable);
+            }
+
+            if (Embedded)
+            {
+                // 子窗口的尺寸/位置/presenter 全归 EmbeddedWindow 管。
+                // 这里只要碰 AppWindow.Resize，刚 SetWindowPos 摆好的几何就被打回默认值。
+                if (spec.Theme is { Length: > 0 } embeddedTheme)
+                {
+                    _pendingTheme = embeddedTheme;
+                    ApplyTheme(embeddedTheme);
+                }
+
+                return;
             }
 
             HostLog.Write("[window] title ok");
@@ -1004,20 +1734,25 @@ internal sealed class FormRenderer
             return;
         }
 
-        var current = _window.Content as FrameworkElement;
+        if (_contentHost is null)
+        {
+            return;
+        }
+
+        var current = _contentHost.Children.Count > 0 ? _contentHost.Children[0] : null;
 
         if (enabled && current is not ScrollViewer)
         {
             // 必须先摘下来：同一个控件挂在两个父容器上，WinUI 会直接杀进程
-            _window.Content = null;
-            _window.Content = WrapForScroll(root);
+            _contentHost.Children.Clear();
+            _contentHost.Children.Add(WrapForScroll(root));
             HostLog.Write("[window] scroll on");
         }
         else if (!enabled && current is ScrollViewer scroller)
         {
-            _window.Content = null;
             scroller.Content = null;
-            _window.Content = root;
+            _contentHost.Children.Clear();
+            _contentHost.Children.Add(root);
             HostLog.Write("[window] scroll off");
         }
     }
@@ -1044,6 +1779,9 @@ internal sealed class FormRenderer
 
             appWindow.SetIcon(full);
             HostLog.Write($"[window] icon \"{full}\"");
+
+            // 系统图标换了，标题栏那颗也跟着换（从窗口属性重新读一次）
+            _ = RefreshTitleIconAsync();
         }
         catch (Exception ex)
         {

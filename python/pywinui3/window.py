@@ -37,6 +37,24 @@ class Window(Widget):
                         rows=["*"], columns=["auto", "*"])
         side = ui.ListBox(win, width=220, auto_collapse=True, collapsed_width=40)
         side.grid(row=0, column=0)
+
+    嵌入子窗口：传 ``parent`` 后本窗口不再是独立顶层窗口，
+    而是以 WS_CHILD 嵌进父窗口的客户区。::
+
+        main = ui.Window(title="主窗口")
+        sub = ui.Window(app, title="子窗口", parent=main,
+                        width=480, height=320, layer="highest")
+        sub.render()
+
+    ``layer`` 只有两档，正好对应子 HWND 唯一有效的两个 z 序位置：
+    ``highest``（``HWND_TOP``，压在同父的其他子窗口之上）和
+    ``lowest``（``HWND_BOTTOM``）。``TOPMOST`` / ``NOTOPMOST`` 对 ``WS_CHILD``
+    窗口无效，所以不开放。
+
+    嵌入后的行为：保留系统标题栏（标题文字、按住拖动、关闭按钮都可用，
+    但没有最小化/最大化——子窗口缩不到任务栏去）、跟随父窗口移动、
+    父窗口缩放时按比例跟随、父窗口关闭时一并关闭。
+    子窗口占父客户区的比例由 ``width`` / ``height`` / ``x`` / ``y`` 换算得出。
     """
 
     #: 窗口内容根就是垂直容器，所以直接子控件默认从上往下排列。
@@ -58,6 +76,7 @@ class Window(Widget):
             "always_on_top",
             "minimizable",
             "maximizable",
+            "maximize_requestable",
             "maximized",
             "scroll",
             "theme",
@@ -67,6 +86,10 @@ class Window(Widget):
 
     #: 窗口根节点可用的布局类型。默认 Column：直接子控件从上往下排。
     _LAYOUTS = {"column": "Column", "row": "Row", "grid": "Grid"}
+
+    #: 嵌入子窗口的层级。子 HWND 调 SetWindowPos 只认 HWND_TOP / HWND_BOTTOM，
+    #: TOPMOST / NOTOPMOST 对 WS_CHILD 窗口无效，所以只开放这两种。
+    _LAYERS = frozenset({"highest", "lowest"})
 
     def __init__(
         self,
@@ -78,10 +101,21 @@ class Window(Widget):
         scroll: bool = True,
         layout: str = "column",
         session: str | None = None,
+        parent: "Window | None" = None,
+        layer: str = "highest",
         **kwargs: Any,
     ):
         # 不走 super().__init__：Window 没有 master，初始化路径与普通控件不同
         self._app = app if app is not None else App.default()
+
+        # 嵌入层级：子窗口的 z 序只有"最上/最下"两档
+        if layer not in self._LAYERS:
+            raise ValueError(
+                f"layer 只能是 highest 或 lowest，收到 {layer!r}。"
+                "子窗口的 z 序只对应 HWND_TOP / HWND_BOTTOM，TOPMOST 那类值对 WS_CHILD 无效。"
+            )
+        if parent is self:
+            raise ValueError("parent 不能指向窗口自己")
 
         # session=None 时：第一扇窗是 main，后续自动分配 w1/w2...
         if session is None:
@@ -98,6 +132,9 @@ class Window(Widget):
         self._destroyed = False
         # Window 不绑定变量，但事件分发会统一调用 _sync_from_event，需要这个占位
         self._variable: Any = None
+        # 关闭按钮的接管回回调；None 表示默认行为（直接关）
+        self._close_request_handler: Callable[..., Any] | None = None
+        self._maximize_request_handler: Callable[..., Any] | None = None
 
         self._window_props: dict[str, Any] = {
             "title": title,
@@ -105,6 +142,11 @@ class Window(Widget):
             "height": height,
             "scroll": scroll,
         }
+
+        # 嵌入子窗口：只登记父会话 id 和层级，几何由宿主按父客户区比例算
+        if parent is not None:
+            self._window_props["parent"] = parent._session
+            self._window_props["layer"] = layer
 
         # 窗口专属属性从 kwargs 里摘出来，剩下的当成容器属性
         for key in list(kwargs):
@@ -129,6 +171,12 @@ class Window(Widget):
         return dict(self._window_props)
 
     def configure(self, **kwargs: Any) -> None:
+        # 父子关系是建窗时定死的：子 HWND 已经 SetParent 到父窗口上，
+        # 运行期换父需要销毁重建，超出 configure 的语义。
+        for fixed in ("parent", "layer"):
+            if fixed in kwargs:
+                raise ValueError(f"{fixed} 只能在构造 Window 时指定，运行期不支持修改")
+
         window_props: dict[str, Any] = {}
         node_props: dict[str, Any] = {}
 
@@ -198,6 +246,70 @@ class Window(Widget):
         """窗口即将关闭时回调。首版不支持取消关闭。"""
         self.bind("closing", callback)
 
+    def on_close_request(self, callback: Callable[..., None] | None) -> None:
+        """接管标题栏上的关闭按钮。
+
+        嵌入子窗口的关闭按钮**不会**直接关窗，宿主会先发一条
+        ``closeRequested`` 事件回来。给了回调就由你决定怎么处理；
+        不注册（或传 None）则默认直接关闭这扇窗口::
+
+            def ask(_e):
+                if ui.ask_yes_no("确定关闭？"):
+                    sub.close()
+
+            sub.on_close_request(ask)
+
+        这和 :meth:`on_close` 不同：``on_close`` 是窗口已经在关的路上，
+        拿不到取消机会；这里窗口还开着，关不关完全由你决定。
+        """
+        self._close_request_handler = callback
+
+    def on_maximize_request(self, callback: Callable[..., None] | None) -> None:
+        """接管标题栏上的最大化 / 还原按钮。
+
+        宿主**不会**自己做最大化——它把 ``maximizeRequested`` 事件发回来，
+        由你决定要做什么。没注册回调（或者传 None）时，标题栏上的最大化
+        按钮是**禁用**的（灰着，点不动）::
+
+            def on_max(e):
+                if e.data.get("maximized"):
+                    w.restore()
+                else:
+                    w.maximize()
+
+            w.on_maximize_request(on_max)
+
+        ``e.data["maximized"]`` 是当前是不是最大化状态。
+        """
+        self._maximize_request_handler = callback
+
+        # 告诉宿主按钮该不该启用：没回调就禁用
+        requestable = callback is not None
+        self._window_props["maximizeRequestable"] = requestable
+
+        if self._app is not None and self._app._host is not None:
+            self._app._send_patch(
+                [protocol.op_window({"maximizeRequestable": requestable})]
+            )
+
+    def _on_event(self, event: Any) -> None:
+        # 自绘标题栏的关闭按钮走这里，而不是用户 bind 的事件通道
+        if getattr(event, "name", None) == "closeRequested":
+            handler = self._close_request_handler
+            if handler is None:
+                self.close()
+            else:
+                handler(event)
+            return
+
+        if getattr(event, "name", None) == "maximizeRequested":
+            handler = self._maximize_request_handler
+            if handler is not None:
+                handler(event)
+            return
+
+        super()._on_event(event)
+
     def on_resize(self, callback: Callable[..., None]) -> None:
         """窗口尺寸变化时回调，``e.data`` 里是 ``width`` / ``height``（逻辑像素）。"""
         self.bind("sizeChanged", callback)
@@ -248,6 +360,21 @@ class Window(Widget):
     def activate(self) -> None:
         """把窗口提到前台并激活。"""
         self._app._send_invoke(self._id, "activate")
+
+    def start_move(self) -> None:
+        """让窗口跟随鼠标移动，直到松开左键。
+
+        主要给**自绘标题栏**用：嵌入子窗口自带系统标题栏，按住就能拖，
+        一般用不到这个方法。只有当窗口藏掉了系统标题栏、自己画一条的时候，
+        才需要在自绘条上绑定 ``pointerPressed``::
+
+            bar = ui.Label(win, "⠿  按住这里拖动")
+            bar.bind("pointerPressed", lambda e: win.start_move())
+
+        触发时机是「按下」——按下的那一刻把控制权交给系统，之后窗口一直
+        跟着鼠标走直到松手，手感和按系统标题栏一致。
+        """
+        self._app._send_invoke(self._id, "start_move")
 
     def protocol(self, _name: str, callback: Callable[..., None]) -> None:
         """tkinter 兼容：``protocol("WM_DELETE_WINDOW", fn)``。"""

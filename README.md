@@ -10,7 +10,7 @@ JSON Lines。`mainloop()` 的语义与 tkinter 一致；宿主崩溃不会带走
 | **平台** | Windows 10 19041 (2004) 及以上 |
 | **Python** | 3.10+，仅标准库，零第三方依赖 |
 | **协议** | [docs/protocol.md](docs/protocol.md) 是唯一权威定义 |
-| **能力** | 多窗口、系统托盘、Win2D 画布、D3D11 三维视口、query/result 同步读回、micro 微代码、键盘/焦点/拖放/窗口状态事件 |
+| **能力** | 多窗口与 WS_CHILD 嵌入子窗口、无边框透明圆角窗口、系统托盘、Win2D 画布、D3D11 三维视口、query/result 同步读回、micro 微代码、键盘/焦点/拖放/窗口状态事件 |
 | **版本 / 许可** | 0.2.5 · GPL-3.0-only |
 
 ```python
@@ -818,7 +818,86 @@ canvas.update_shapes([{"id": "p1", "cx": 40, "cy": 60}])   # 只改位置
 
 完整示例见 `examples/15_win2d.py`。
 
-### 6.11 多窗口与窗口控制
+### 6.11 无边框窗口与嵌入子窗口
+
+宿主默认给每扇顶层窗口做**无边框 + 透明圆角**：系统标题栏被去掉，标题栏由 XAML
+自绘（图标、标题、最小化/最大化/关闭），圆角外的像素真的透明，能看到后面的桌面或
+另一扇窗。
+
+圆角的实现按系统分流：
+
+| 系统 | 顶层窗口 | WS_CHILD 子窗口 |
+|---|---|---|
+| Windows 11 | DWM 系统圆角（`DWMWA_WINDOW_CORNER_PREFERENCE = ROUND`），带抗锯齿和正确阴影 | 自绘 8px 圆角 |
+| Windows 10 | 自绘 8px 圆角（Composition 几何裁剪，也带抗锯齿） | 自绘 8px 圆角 |
+
+自绘那条路会额外裁掉窗口最外 10px，用来遮 Windows 10 上 DWM 合成缓存偶尔残留的
+一圈半透明灰边。这 10px 不参与命中，其余部分行为正常。
+
+标题栏左侧的图标**不是写死的字形**：它从窗口的 Win32 属性里读真实图标
+（`WM_GETICON` → 窗口类默认图标），读不到时用 `imageres.dll` 的默认 exe 图标。
+所以给了 `icon=` 之后，标题栏和系统任务栏看到的是同一个图标。
+
+#### 最大化按钮要显式接管
+
+宿主不自己决定要不要最大化——**没挂 Python 回调时，最大化按钮是禁用的**（灰着，
+点不动；双击标题栏也不生效）。要启用就注册 `on_maximize_request`：
+
+```python
+def on_max(e):
+    if e.data.get("maximized"):
+        win.restore()
+    else:
+        win.maximize()
+
+win.on_maximize_request(on_max)
+```
+
+回调收到 `maximizeRequested` 事件，`e.data["maximized"]` 是当前状态。
+`on_maximize_request(None)` 会重新禁用按钮。
+
+关闭按钮同理：`on_close_request` 不注册时默认直接关窗，注册后可以拦下来询问用户：
+
+```python
+def ask_close(e):
+    if ui.dialog("确认", "确定关闭？", kind="warn"):
+        win.close()
+
+win.on_close_request(ask_close)
+```
+
+#### 嵌入子窗口：`parent` 与 `layer`
+
+传 `parent=另一扇窗` 后，本窗口降级成 **WS_CHILD 子窗口**，不再是独立顶层窗口：
+
+```python
+app = ui.App()
+parent = ui.Window(app, title="父窗口", width=900, height=640)
+
+front = ui.Window(app, title="置顶子窗口", parent=parent, layer="highest",
+                  width=300, height=200, x=24, y=64)
+back = ui.Window(app, title="垫底子窗口", parent=parent, layer="lowest",
+                 width=300, height=200, x=160, y=140)
+
+# 子窗口标题栏按钮：最小化 = 折叠成左下角的小条，最大化 = 填满父客户区
+front.on_maximize_request(lambda e: front.maximize() if not e.data.get("maximized") else front.restore())
+
+parent.mainloop()
+```
+
+要点：
+
+- **层级只有两档**：`highest`（`HWND_TOP`）和 `lowest`（`HWND_BOTTOM`）。
+  `TOPMOST` / `NOTOPMOST` 对 WS_CHILD 窗口无效，所以不开放。
+- 子窗口随父窗口移动、最小化；父窗口关闭时一并关闭。任务栏不会多出按钮。
+- 子窗口能在父窗口**可见区域**内拖动：左右贴边、上沿不压父窗口标题栏、
+  下沿不越过父窗口底边。折叠后小条落在可见区左下角。
+- 子窗口的 `on_close_request` 不注册时默认关掉这一扇，不影响父窗口。
+- 子窗口不能是另一扇子窗口的父（`parent` 必须指向顶层窗口）。
+
+完整可运行示例见 `examples/18_embedded.py`。
+
+### 6.12 多窗口与窗口控制
 
 一个 `App` 可以有多扇窗。第一扇是 `main` 会话，之后每扇自动分配 `w1` / `w2` ...：
 
@@ -836,7 +915,7 @@ main.mainloop()   # 启动时会把所有已创建窗口都渲染出来
 ```
 
 每扇窗有独立的控件树，事件按会话路由。main 窗口关闭会退出整个应用，
-和单窗口时行为一致。
+和单窗口时行为一致。想要**嵌进父窗口**的子窗口，用上一节的 `parent=` 参数。
 
 运行时再新建窗口也可以：构造 `Window(app, session="custom")` 后调 `win.render()`
 把控件树发给宿主，宿主会为新会话建一扇窗。
@@ -844,7 +923,7 @@ main.mainloop()   # 启动时会把所有已创建窗口都渲染出来
 协议层为向后兼容，main 会话的报文不写 `session` 字段，
 与旧版宿主完全一致。完整示例见 `examples/17_multiwindow.py`。
 
-### 6.12 托盘图标
+### 6.13 托盘图标
 
 ```python
 tray = ui.TrayIcon("app", icon="C:/path/app.ico", tooltip="我的应用")
@@ -857,7 +936,7 @@ tray.destroy()
 托盘回调走 Win32 消息，宿主复用主窗口句柄挂 WndProc 子类接收，
 不需要额外的消息循环。退出时会自动清理所有图标，不留僵尸。
 
-### 6.13 多窗口并发弹窗与文件对话框
+### 6.14 多窗口并发弹窗与文件对话框
 
 对话框按会话串行：同一扇窗同时只能开一个，不同窗口可以并发弹窗。
 
@@ -874,7 +953,7 @@ paths = app.file_dialog("open", title="请选择文件", initial_dir="D:/docs")
 
 COM 调用不可用时自动回退到 WinRT picker（标题会被忽略）。
 
-### 6.10 D3D11 三维视口
+### 6.15 D3D11 三维视口
 
 `Viewport3D` 走真 GPU 管线：有深度缓冲（正确遮挡）、顶点/像素着色器（真实光照），
 面数上限几十万，且**渲染循环完全在宿主里跑**，旋转不产生跨进程流量。
@@ -928,8 +1007,17 @@ viewport = ui.Viewport3D(
 | `examples/08_load_fail.py` | 加载 → 失败：加载圈 0.5 秒保底 + 失败错误界面 |
 | `examples/09_webview2.py` | WebView2：当前网址 / 导航事件 / HTML 字符串 / 缺运行时的灰色降级页 |
 | `examples/10_extended_controls.py` | 扩展控件总览 + query 读回 + 键盘/焦点/窗口状态事件 |
+| `examples/11_file_dialog.py` | 文件 / 文件夹选择对话框 |
+| `examples/12_rich_items.py` | 富文本与带子控件的动态条目 |
+| `examples/13_showcase.py` | 综合展示 |
+| `examples/14_canvas.py` | Canvas 基础几何图元 |
+| `examples/15_win2d.py` | Win2D 加速画布 |
+| `examples/16_viewport3d.py` | D3D11 三维视口 |
+| `examples/17_multiwindow.py` | 多扇平级顶层窗口与窗口控制 |
+| `examples/18_embedded.py` | **WS_CHILD 嵌入子窗口**：highest / lowest 层级、拖动、折叠、层级切换 |
 
 `02_controls.py` 用于肉眼验收；`03_live.py` 用来确认「实时」这件事——全程没有手动刷新调用。
+`17` 与 `18` 对照看：前者是平级顶层窗，后者是嵌进父客户区的子窗口。
 
 ---
 
@@ -939,14 +1027,16 @@ viewport = ui.Viewport3D(
   布局计算，只把 `padx/pady` 翻译成 margin、`fill` 翻译成对齐。新代码建议直接用
   `Column` / `Row` / `Grid`。
 - **`place()` 不实现**。WinUI 没有绝对定位，调用会抛 `NotImplementedError`。
-- **Windows 10 上部分视觉效果降级**。Mica 背景、控件圆角需要 Windows 11，宿主按能力位
-  自动回落（Acrylic 或纯色）。
-- **多窗口是平级窗口**。`Window(session="x")` 可开多扇窗，每扇有独立控件树与事件；
-  但 `Window` 不能作为 XAML 元素嵌进另一扇窗，没有 tkinter 那种父子 `Toplevel` 层级。
-  对话框按会话串行，同一扇窗同时只能弹一个。
+- **Windows 10 上 Mica 降级**。Mica 背景是 Windows 11 专属，宿主按能力位自动回落
+  （Acrylic 或纯色）。窗口圆角不受影响：Win11 用 DWM 系统圆角，Win10 用自绘圆角
+  （Composition 裁剪，同样带抗锯齿），两者都是 8px。
+- **顶层窗口之间是平级的**。`Window(session="x")` 开多扇顶层窗，没有 tkinter 那种
+  父子 `Toplevel` 层级。要嵌进另一扇窗请用 `parent=`（见 6.11），但那会降级成
+  WS_CHILD，不再有独立任务栏按钮。对话框按会话串行，同一扇窗同时只能弹一个。
 - **窗口没有尺寸上限**。`AppWindow` 不提供 `maxWidth` / `maxHeight`，只能靠 Win32 子类化
   拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
-- **关闭事件不可取消**。`closing` 只是通知，拦不住关窗；需要「确认退出」请在界面里做。
+- **关闭事件默认不可取消**。`closing` 只是通知；要拦下来询问用户，用
+  `on_close_request(callback)`（见 6.11）。
 - **启动至少 0.5 秒**。加载圈有保底显示时间，否则在快机器上只闪一两帧，看起来像界面抖动。
 - **回调在主线程执行**。回调里阻塞会卡住整个 UI，与 tkinter 行为一致。
 - **读回是同步阻塞的**。`query()` 默认等 2 秒，在主线程上阻塞；回调里连续读几百次会明显

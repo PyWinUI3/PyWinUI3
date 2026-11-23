@@ -58,6 +58,17 @@ internal static class TraySupport
     [DllImport("user32.dll")]
     private static extern bool DestroyIcon(IntPtr hIcon);
 
+    // comctl32 的这几个函数只有序号导出，没有名字。序号必须严格对应：
+    //   410 = SetWindowSubclass
+    //   411 = GetWindowSubclass
+    //   412 = RemoveWindowSubclass
+    //   413 = DefSubclassProc
+    // 之前 412 和 413 写反了：DefSubclassProc 实际调到了 RemoveWindowSubclass，
+    // 于是每条窗口消息都没能继续往下传（返回的还是一个 BOOL 当 LRESULT 用）。
+    // 后果非常隐蔽：XAML 内容照常显示（走 DirectComposition 不依赖 WndProc），
+    // 但 WM_NCCALCSIZE / WM_NCPAINT / WM_SETTEXT 全被吞掉——
+    // 表现为窗口没有标题栏（没有标题文字、没有最小化/关闭按钮），
+    // 而且设置 Window.Title 也不生效。
     [DllImport("comctl32.dll", EntryPoint = "#410")]
     private static extern bool SetWindowSubclass(
         IntPtr hWnd,
@@ -65,13 +76,13 @@ internal static class TraySupport
         UIntPtr id,
         UIntPtr data);
 
-    [DllImport("comctl32.dll", EntryPoint = "#413")]
+    [DllImport("comctl32.dll", EntryPoint = "#412")]
     private static extern bool RemoveWindowSubclass(
         IntPtr hWnd,
         SubclassProc proc,
         UIntPtr id);
 
-    [DllImport("comctl32.dll", EntryPoint = "#412")]
+    [DllImport("comctl32.dll", EntryPoint = "#413")]
     private static extern IntPtr DefSubclassProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
     private delegate IntPtr SubclassProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, UIntPtr data);

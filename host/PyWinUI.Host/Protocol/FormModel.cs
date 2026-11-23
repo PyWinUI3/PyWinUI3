@@ -25,6 +25,14 @@ public sealed class WindowSpec
     public string? Icon { get; set; }
 
     public bool? AlwaysOnTop { get; set; }
+
+    /// <summary>
+    /// 是否把「最大化」交给 Python 回调处理。
+    ///
+    /// false（默认）时标题栏上的最大化按钮是**禁用**的——宿主不自己决定
+    /// 要不要最大化，只有 Python 那边挂了回调才启用。
+    /// </summary>
+    public bool? MaximizeRequestable { get; set; }
     public bool? Minimizable { get; set; }
     public bool? Maximizable { get; set; }
 
@@ -42,6 +50,20 @@ public sealed class WindowSpec
 
     /// <summary>auto | mica | acrylic | none</summary>
     public string? Backdrop { get; set; }
+
+    /// <summary>
+    /// 父窗口的会话 id。非空时本窗口以 WS_CHILD 嵌进父窗口客户区，
+    /// 不再是独立顶层窗口——父窗口移动/最小化时它跟着走，父窗口关闭时一并关闭。
+    /// </summary>
+    public string? Parent { get; set; }
+
+    /// <summary>
+    /// 嵌入子窗口的 z 序层级：highest / lowest，缺省 highest。
+    ///
+    /// 只有这两个值：子 HWND 的 SetWindowPos 只认 HWND_TOP 和 HWND_BOTTOM，
+    /// TOPMOST / NOTOPMOST 对 WS_CHILD 窗口无效，给别的值没有意义。
+    /// </summary>
+    public string? Layer { get; set; }
 }
 
 /// <summary>

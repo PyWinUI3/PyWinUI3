@@ -370,6 +370,8 @@ public static class Inbound
         spec.Scroll = TryBool(e, "scroll");
         spec.Theme = TryString(e, "theme");
         spec.Backdrop = TryString(e, "backdrop");
+        spec.Parent = TryString(e, "parent");
+        spec.Layer = TryString(e, "layer");
         return spec;
     }
 

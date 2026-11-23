@@ -39,6 +39,15 @@ internal sealed class WindowContext
     public long Rev;
     public bool FirstRenderNotified;
     public bool Closed;
+
+    /// <summary>
+    /// 非 null 表示这扇窗是另一个会话的 WS_CHILD 子窗口。
+    /// 父窗口关闭时按这个字段找出来一并关掉。
+    /// </summary>
+    public string? ParentSession { get; set; }
+
+    /// <summary>控件树的根节点 id。窗口级事件（如 closeRequested）用它作为事件来源。</summary>
+    public string? RootId { get; set; }
 }
 
 internal sealed class Session
@@ -118,19 +127,63 @@ internal sealed class Session
             (nodeId, eventName, data, echo) => Emit(sessionId, nodeId, eventName, data, echo),
             line => Send(line));
 
+        // 自绘标题栏的三个按钮。行为按窗口类型分流：主窗口走系统的
+        // 最小化/最大化，嵌入子窗口走折叠/填满父客户区。
+        context.Renderer.CloseButtonPressed = () => RequestClose(context);
+        context.Renderer.MinimizeButtonPressed = () => MinimizeOrCollapse(context);
+        context.Renderer.MaximizeButtonPressed = () => ToggleMaximize(context);
+
         return context;
     }
 
     /// <summary>
     /// 为一扇新会话创建窗口。render 消息自带 window spec，
     /// 这里的尺寸只是首帧前的占位，收到 render 后会被覆盖。
+    ///
+    /// spec.Parent 非空时，窗口建好并 Activate 之后会被降级成父窗口的
+    /// WS_CHILD 子窗口（先亮一下是为了让 XamlRoot 就绪）。
     /// </summary>
-    private WindowContext CreateWindow(string sessionId)
+    private WindowContext CreateWindow(string sessionId, WindowSpec spec)
     {
         var window = new Window
         {
-            Title = "PyWinUI3",
+            Title = string.IsNullOrEmpty(spec.Title) ? "PyWinUI3" : spec.Title,
         };
+
+        // 只有顶层窗口才切「无系统标题栏 + 透明背景」。
+        // 嵌入子窗口本身就是无边框 WS_CHILD，对它调 ExtendsContentIntoTitleBar
+        // 会让 XAML 内容不再绘制（窗口在、但整片空白）。
+        var isTopLevel = string.IsNullOrEmpty(spec.Parent);
+
+        // 透明 backdrop 必须在 Activate **之前**挂上。
+        //
+        // WinUIEx 的 TransparentTintBackdrop 在 OnTargetConnected 里接管窗口消息、
+        // 做 DWM 扩展帧和背景擦除——这些都要在窗口还没激活、表面还没建好时接进去，
+        // 等 Activate 之后再设就晚了，DWM 那一层会留下白色的窗口底色，
+        // 表现是「圆角是圆的，但圆角外还是一圈白」。
+        if (isTopLevel)
+        {
+            // 无边框 + 透明背景必须在 Activate **之前**全部做完。
+            //
+            // 顺序反了会怎样（实测）：Activate 之后再改窗口样式、才挂 backdrop，
+            // 框架已经把窗口表面建好，这套改动赶不上——窗口退回直角白块，
+            // 圆角和透明全都没有。
+            CustomChrome.EnableBackdrop(window);
+            CustomChrome.Enable(window);
+        }
+        else
+        {
+            // 子窗口也要把根 Visual 的默认底色换成透明。
+            //
+            // WinUI 的 Window 根 Visual 默认带一层不透明的底色（浅色主题下
+            // 是白色）。顶层窗口有 WinUIEx 的 backdrop 盖住它，子窗口没有——
+            // 于是整块客户区糊着一个**矩形白底**，哪怕里面的内容已经圆角
+            // 裁剪过，矩形底色仍在四周露出来。
+            //
+            // 这里用只设透明画刷的那个，不走 WinUIEx：DWM 那套对 WS_CHILD
+            // 无效，而它的背景擦除会把子窗口客户区涂黑，反而多一块黑矩形。
+            CustomChrome.EnableTransparentBackdrop(window);
+        }
 
         // XamlRoot 在 Activate 之前为 null，部分控件首帧会失败
         window.AppWindow.Resize(new Windows.Graphics.SizeInt32(800, 600));
@@ -139,6 +192,32 @@ internal sealed class Session
         var context = CreateContext(sessionId, window);
         window.Closed += (_, _) => OnSessionWindowClosed(sessionId);
         _contexts[sessionId] = context;
+
+        if (!string.IsNullOrEmpty(spec.Parent))
+        {
+            if (_contexts.TryGetValue(spec.Parent, out var parent) && !parent.Closed)
+            {
+                if (EmbeddedWindow.Attach(window, parent.Window, spec,
+                        message => Warn(sessionId, message)))
+                {
+                    context.ParentSession = spec.Parent;
+                    // 子窗口的尺寸/位置由 SetWindowPos 管，renderer 不能再 Resize 回去
+                    context.Renderer.Embedded = true;
+                    // 自绘标题栏的两个按钮：关闭交给 Python，最小化收进父窗口左下角
+                    context.Renderer.CloseButtonPressed = () => RequestClose(context);
+                    context.Renderer.MinimizeButtonPressed = () =>
+                    {
+                        EmbeddedWindow.ToggleCollapse(window, parent.Window);
+                        // 折叠后按钮要变成「还原」图标
+                        context.Renderer.SetCollapsedVisual(EmbeddedWindow.IsCollapsed(window));
+                    };
+                }
+            }
+            else
+            {
+                Warn(sessionId, $"父窗口 {spec.Parent} 不存在或已关闭，按普通窗口打开");
+            }
+        }
 
         HostLog.Write($"new window for session {sessionId}");
         return context;
@@ -236,6 +315,95 @@ internal sealed class Session
         ShowWindow(hwnd, command);
     }
 
+    /// <summary>
+    /// 子窗口自绘标题栏的关闭按钮：**不直接关**，而是发一条 <c>closeRequested</c>
+    /// 事件，把决定权交给 Python。
+    ///
+    /// Python 侧不注册回调时默认关闭该窗口（见 Window._on_event），
+    /// 注册了 on_close_request 就由它决定要不要调 close()、或者先弹个确认框。
+    /// </summary>
+    private void RequestClose(WindowContext context)
+    {
+        if (context.Closed)
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(context.RootId))
+        {
+            // 还没 render 过（连根节点都没有），没什么可问的，直接关
+            CloseSessionWindow(context, 0);
+            return;
+        }
+
+        Send(Outbound.Event(
+            context.RootId!,
+            "closeRequested",
+            context.Rev,
+            null,
+            echo: false,
+            session: context.SessionId));
+    }
+
+    /// <summary>
+    /// 标题栏的最小化按钮。主窗口走系统最小化；嵌入子窗口折叠成一条，
+    /// 收到父窗口客户区左下角并置顶。
+    /// </summary>
+    private void MinimizeOrCollapse(WindowContext context)
+    {
+        if (context.Closed)
+        {
+            return;
+        }
+
+        if (context.ParentSession is { } parentSession
+            && _contexts.TryGetValue(parentSession, out var parent))
+        {
+            EmbeddedWindow.ToggleCollapse(context.Window, parent.Window);
+            context.Renderer.SetCollapsedVisual(EmbeddedWindow.IsCollapsed(context.Window));
+            return;
+        }
+
+        if (context.Window.AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.Minimize();
+        }
+    }
+
+    /// <summary>
+    /// 标题栏的最大化 / 还原按钮（双击标题栏也走这里）。
+    /// 嵌入子窗口是填满父客户区，主窗口是系统最大化。
+    /// </summary>
+    private void ToggleMaximize(WindowContext context)
+    {
+        if (context.Closed || string.IsNullOrEmpty(context.RootId))
+        {
+            return;
+        }
+
+        // 最大化交给 Python 决定，宿主只负责把事件发回去。
+        //
+        // 没挂回调时标题栏上的最大化按钮是禁用的，点不到；
+        // 挂了就由 Python 自己在回调里调 maximize() / restore()。
+        //
+        // 事件里带上当前是不是最大化，方便回调直接判断该还原还是该最大化。
+        var maximized = false;
+        if (context.Window.AppWindow?.Presenter is OverlappedPresenter presenter)
+        {
+            maximized = presenter.State == OverlappedPresenterState.Maximized;
+        }
+
+        var data = new JsonObject { ["maximized"] = maximized };
+
+        Send(Outbound.Event(
+            context.RootId!,
+            "maximizeRequested",
+            context.Rev,
+            data,
+            echo: false,
+            session: context.SessionId));
+    }
+
     /// <summary>关闭一个非 main 会话窗口：回通知、清状态，宿主继续。</summary>
     private void CloseSessionWindow(WindowContext context, int code)
     {
@@ -246,6 +414,10 @@ internal sealed class Session
 
         context.Closed = true;
         _contexts.Remove(context.SessionId);
+
+        // 子窗口跟随父窗口关闭：子 HWND 是父窗口的一部分，
+        // 父窗口没了它留着就是孤儿，Win32 那头还可能崩。
+        CloseChildren(context.SessionId);
 
         try
         {
@@ -266,7 +438,25 @@ internal sealed class Session
         {
             context.Closed = true;
             _contexts.Remove(sessionId);
+            CloseChildren(sessionId);
             Send(Outbound.WindowClosed(sessionId, 0));
+        }
+    }
+
+    /// <summary>递归关闭某会话名下的所有嵌入子窗口。</summary>
+    private void CloseChildren(string parentSession)
+    {
+        var children = _contexts.Values
+            .Where(c => c.ParentSession == parentSession && !c.Closed)
+            .Select(c => c.SessionId)
+            .ToList();
+
+        foreach (var childId in children)
+        {
+            if (_contexts.TryGetValue(childId, out var child))
+            {
+                CloseSessionWindow(child, 0);
+            }
         }
     }
 
@@ -370,9 +560,10 @@ internal sealed class Session
                 // 新 session 的 render 就是「开一扇新窗口」；main 复用启动时那扇
                 var context = _contexts.TryGetValue(render.Session, out var existing)
                     ? existing
-                    : CreateWindow(render.Session);
+                    : CreateWindow(render.Session, render.Window);
 
                 context.Rev = render.Rev;
+                context.RootId = render.Root;
                 // 窗口能力（最大化/最小化）由 ApplyWindowSpec 在成功落地窗口属性时一并交还，
                 // 渲染失败时窗口保持加载态的小尺寸——那里能最大化毫无意义。
                 context.Renderer.Render(render);
@@ -381,6 +572,11 @@ internal sealed class Session
                 if (!context.FirstRenderNotified)
                 {
                     context.FirstRenderNotified = true;
+
+                    // 首帧落地了，强制发一次「原地移动」通知，让框架把
+                    // 最大化图标、圆角、拖动基准这些状态重新算一遍。
+                    CustomChrome.NotifyMove(context.Window);
+
                     if (ReferenceEquals(context, _main))
                     {
                         FirstRenderApplied?.Invoke();
@@ -698,7 +894,7 @@ internal sealed class Session
     /// </summary>
     private bool TryWindowInvoke(string method, WindowContext ctx)
     {
-        if (method is not ("minimize" or "maximize" or "restore" or "activate"))
+        if (method is not ("minimize" or "maximize" or "restore" or "activate" or "start_move"))
         {
             return false;
         }
@@ -708,6 +904,14 @@ internal sealed class Session
             if (method == "activate")
             {
                 ctx.Window.Activate();
+                return true;
+            }
+
+            if (method == "start_move")
+            {
+                // 自绘标题栏按下时调用：把「按住标题栏拖动」的流程手动喂给系统，
+                // 之后窗口跟随鼠标直到松开左键。
+                EmbeddedWindow.StartMove(ctx.Window);
                 return true;
             }
 

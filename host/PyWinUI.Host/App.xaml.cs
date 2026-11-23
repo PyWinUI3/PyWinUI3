@@ -4,6 +4,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using PyWinUI.Host.Rendering;
 using Windows.Graphics;
 using Windows.UI;
 
@@ -46,6 +47,7 @@ public sealed partial class HostApp : Application
     public HostApp()
     {
         InitializeComponent();
+
         HostLog.Write("ctor: InitializeComponent done");
 
         UnhandledException += (_, e) => HostLog.Write("UnhandledException: " + e.Exception);
@@ -65,6 +67,14 @@ public sealed partial class HostApp : Application
         {
             Title = _silent ? "应用" : "正在加载",
         };
+
+        // 透明 backdrop 必须在 Activate 之前挂上（WinUIEx 的 DWM 接管要赶在
+        // 窗口激活、表面建好之前，否则窗口外缘会留一圈白色底色）。
+        CustomChrome.EnableBackdrop(_window);
+
+        // 无系统标题栏 + 圆角裁剪：标题栏由 FormRenderer 的自绘外壳提供，
+        // 透明是为了让圆角外侧能露出后面的东西（否则四角还是直角底色）。
+        CustomChrome.Enable(_window);
 
         if (_silent)
         {
@@ -316,7 +326,20 @@ public sealed partial class HostApp : Application
         stack.Children.Add(ring);
         stack.Children.Add(caption);
 
-        return stack;
+        // 窗口现在是真透明的（WinUIEx 的 backdrop + 背景擦除），
+        // 光靠一个居中的 StackPanel 的话，窗口里就只剩一个圈在飘——
+        // 底下露的是桌面。这里自己垫一层白色圆角底。
+        var dark = Application.Current.RequestedTheme == ApplicationTheme.Dark;
+        var background = dark
+            ? Windows.UI.Color.FromArgb(255, 0x20, 0x20, 0x20)
+            : Windows.UI.Color.FromArgb(255, 0xFF, 0xFF, 0xFF);
+
+        return new Border
+        {
+            Background = new SolidColorBrush(background),
+            CornerRadius = new CornerRadius(12),
+            Child = stack,
+        };
     }
 
     /// <summary>
