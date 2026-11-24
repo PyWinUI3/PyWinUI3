@@ -59,6 +59,8 @@ jobs:
       # 装的却是 x64 exe」这种启动才炸的错误。
       - name: 校验 wheel 标签与 exe 架构
         shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           $wheel = Get-ChildItem "dist\pywinui3-*-${{ matrix.wheel_tag }}.whl" |
                    Sort-Object LastWriteTime -Descending | Select-Object -First 1

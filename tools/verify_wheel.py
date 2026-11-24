@@ -23,6 +23,13 @@ import sys
 import zipfile
 from pathlib import Path
 
+# Windows runner 的 stdout 默认 cp1252，下面的中文提示会抛 UnicodeEncodeError。
+# 强制 stdout/stderr 用 UTF-8（与 tests/smoke_*.py 同款处理）。
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
+    sys.stderr.reconfigure(encoding="utf-8")
+
 # PE COFF Machine 字段
 IMAGE_FILE_MACHINE_AMD64 = 0x8664
 IMAGE_FILE_MACHINE_ARM64 = 0xAA64
