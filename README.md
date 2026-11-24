@@ -11,7 +11,7 @@ JSON Lines。`mainloop()` 的语义与 tkinter 一致；宿主崩溃不会带走
 | **Python** | 3.10+，仅标准库，零第三方依赖 |
 | **协议** | [docs/protocol.md](docs/protocol.md) 是唯一权威定义 |
 | **能力** | 多窗口与 WS_CHILD 嵌入子窗口、无边框透明圆角窗口、系统托盘、Win2D 画布、D3D11 三维视口、query/result 同步读回、micro 微代码、键盘/焦点/拖放/窗口状态事件 |
-| **版本 / 许可** | 1.0.0-rc1 · GPL-3.0-only |
+| **版本 / 许可** | 1.0.0rc2 · GPL-3.0-only |
 
 ```python
 import pywinui3 as ui
@@ -57,7 +57,7 @@ win.mainloop()
 **从 release 安装**（推荐；仅 Windows，需要 Python 3.10+）：
 
 ```powershell
-pip install https://github.com/PyWinUI3/PyWinUI3/releases/download/v1.0.0-rc1/pywinui3-1.0.0rc1-py3-none-win_amd64.whl
+pip install https://github.com/PyWinUI3/PyWinUI3/releases/download/v1.0.0rc2/pywinui3-1.0.0rc2-py3-none-win_amd64.whl
 ```
 
 这是当前已发布的版本；发布新版本后把两处版本号一起换成新标签。包**没有发布到 PyPI**，只能从这里装。
@@ -822,7 +822,8 @@ canvas.update_shapes([{"id": "p1", "cx": 40, "cy": 60}])   # 只改位置
 
 宿主默认给每扇顶层窗口做**无边框 + 透明圆角**：系统标题栏被去掉，标题栏由 XAML
 自绘（图标、标题、最小化/最大化/关闭），圆角外的像素真的透明，能看到后面的桌面或
-另一扇窗。
+另一扇窗。Win10 和 Win11 用的都是这条自绘标题栏；Win11 上只是窗口圆角交给 DWM
+按整窗绘制，标题栏本身仍由 XAML 画（不会露出系统标题栏，也不会出现双重轮廓）。
 
 圆角的实现按系统分流：
 
@@ -856,6 +857,9 @@ win.on_maximize_request(on_max)
 回调收到 `maximizeRequested` 事件，`e.data["maximized"]` 是当前状态。
 `on_maximize_request(None)` 会重新禁用按钮。
 
+关窗（无论是点标题栏按钮还是 `win.close()`）都会先把窗口内容在 **100ms** 内
+缩小到 90% 并淡出，再真正销毁。淡出期间重复调用 `close()` 会被忽略。
+
 关闭按钮同理：`on_close_request` 不注册时默认直接关窗，注册后可以拦下来询问用户：
 
 ```python
@@ -865,6 +869,42 @@ def ask_close(e):
 
 win.on_close_request(ask_close)
 ```
+
+#### 标题栏返回按钮与输入框
+
+两个窗口属性，默认都关：
+
+| 属性 | 效果 |
+|---|---|
+| `return_button=True` | 在应用图标**左边**加一枚返回按钮 |
+| `text_input_box=True` | 在标题文字**右边**加一枚带放大镜图标的输入框 |
+
+返回按钮不自己动窗口，只发 `returnRequested` 交给 Python 回调；输入框输入时发
+`textInputChanged`，按回车发 `textInputSubmitted`，两者都带 `e.data["text"]`：
+
+```python
+win = ui.Window(title="文件管理", return_button=True, text_input_box=True)
+
+win.on_return_request(lambda e: win.close())
+win.on_text_changed(lambda e: print("正在输入:", e.data["text"]))
+win.on_text_input(lambda e: print("搜索:", e.data["text"]))
+```
+
+**两个部件启用时必须先挂回调**，否则 `render()` 会抛 `ValueError`——宿主只把
+操作发回来、不替你做决定，没回调的部件等于坏的：
+
+```python
+win = ui.Window(..., return_button=True, text_input_box=True)
+win.on_return_request(on_back)      # 必须
+win.on_text_input(on_search)        # 输入框这两个至少挂一个
+```
+
+传 `None` 撤销最后一个回调时，部件会**立刻隐藏**（运行期生效），不用再手动
+`configure(...=False)`。`return_button` 也接受早期示例里写错的 `retrun_buttom`
+拼写，两种写法等价。
+
+任一属性打开时标题栏自动从 32px 加高到 **46px**，给按钮和输入框留出空间；
+两个都关掉就恢复紧凑高度。运行期用 `configure()` 切换也会同步改高度。
 
 #### 嵌入子窗口：`parent` 与 `layer`
 
@@ -1015,6 +1055,7 @@ viewport = ui.Viewport3D(
 | `examples/16_viewport3d.py` | D3D11 三维视口 |
 | `examples/17_multiwindow.py` | 多扇平级顶层窗口与窗口控制 |
 | `examples/18_embedded.py` | **WS_CHILD 嵌入子窗口**：highest / lowest 层级、拖动、折叠、层级切换 |
+| `examples/19_titlebar.py` | **标题栏扩展**：返回按钮回调、带图标输入框的输入/回车事件、运行期开关 |
 
 `02_controls.py` 用于肉眼验收；`03_live.py` 用来确认「实时」这件事——全程没有手动刷新调用。
 `17` 与 `18` 对照看：前者是平级顶层窗，后者是嵌进父客户区的子窗口。
@@ -1045,8 +1086,8 @@ viewport = ui.Viewport3D(
 - **窗口状态有事件顺序问题**。`sizeChanged` 比 presenter 状态更新早，在 `on_resize()`
   回调里读 `win.state` 可能还是旧值；要精确判断请在 `on_state_changed()` 里读，或在
   `maximize()` 之后单独 `query()`。
-- **拖放只回报「发生了」**。`drop` 等事件给出 `{accepted}`，不解析 `DataView` 里的文件 /
-  文本内容，也没有 `DragStarting`。
+- **拖放没有 `DragStarting`**。`drop` 事件已解析拖入内容：
+  `e.data["files"]` 是 `[{"path", "name"}]`、`e.data["text"]` 是文本（无则 `null`）。
 - **画布只覆盖基础几何图元**。支持 `Rect` / `Ellipse` / `Line` / `Path` / `Polygon` /
   `Polyline`，但没有渐变填充、`pattern`、`filter`、`mask`、`clipPath`；`d` 只解析几何，
   文本沿路径、`<use>` 引用、SMIL 动画都不支持。
@@ -1064,8 +1105,10 @@ viewport = ui.Viewport3D(
   `ItemsView` 近似，后者需要自己接 `SwapChainPanel` + DirectX。
 - **WebView2 依赖系统运行时**。只覆盖「运行时未安装」这一种失败；运行时存在但初始化失败
   （安装损坏）时该区域仍可能空白。`navigate_to_string()` 的页面没有真实地址。
-  `WebResourceRequested` 拦截、`addHostObjectToScript`、证书 / HTTP 认证尚未
-  实现；网页里的 `window.open()` 新窗口也不接管（框架本身的多窗口见 6.11 节）；`permissionRequested` 未接；WinUI 3 不暴露程序化 `zoomFactor`。
+  证书错误已放行（`--ignore-certificate-errors`）；`addHostObjectToScript` / HTTP 认证
+  尚未实现。权限请求和资源拦截都是可选挂接
+  （不挂就走默认）；`window.open()` 不挂回调时在当前视图打开目标地址（框架本身的多窗口
+  见 6.11 节）；WinUI 3 不暴露程序化 `zoomFactor`。
 
 ---
 

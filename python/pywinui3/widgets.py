@@ -1428,9 +1428,10 @@ class WebView2(Widget):
     # ---- 新窗口：由 Python 回执决定 ----
 
     def on_new_window_request(self, handler: Callable[..., Any]) -> str:
-        """页面调用 ``window.open`` 时触发；必须用 :meth:`respond_new_window` 回执。
+        """页面调用 ``window.open`` 时触发；用 :meth:`respond_new_window` 回执。
 
         ``e.data["requestId"]`` 是回执 id；8 秒不回执按「拒绝」处理。
+        **不挂这个回调时**，宿主按浏览器默认行为在当前视图打开目标地址。
         """
         return self.bind("newWindowRequested", handler)
 
@@ -1445,6 +1446,59 @@ class WebView2(Widget):
         if url is not None:
             args["url"] = str(url)
         self._app._send_invoke(self._id, "respond_new_window", args)
+
+    # ---- 权限：可选回执 ----
+
+    def on_permission_request(self, handler: Callable[..., Any]) -> str:
+        """页面请求摄像头/麦克风/定位等权限时触发。
+
+        ``e.data`` 含 ``requestId`` / ``kind`` / ``uri`` / ``isUserInitiated``。
+        用 :meth:`respond_permission` 回执；不挂回调时交给 WebView2 默认行为，
+        8 秒不回执同样保持默认。
+        """
+        return self.bind("permissionRequested", handler)
+
+    def respond_permission(self, request_id: str, allow: bool) -> None:
+        """允许或拒绝一项权限请求。"""
+        self._app._send_invoke(
+            self._id,
+            "respond_permission",
+            {"requestId": str(request_id), "allow": bool(allow)},
+        )
+
+    # ---- 资源拦截：可选回执 ----
+
+    def on_web_resource_request(self, handler: Callable[..., Any]) -> str:
+        """拦截页面的网络请求（广告过滤、改响应等）。
+
+        ``e.data`` 含 ``requestId`` / ``url`` / ``method`` / ``headers`` /
+        ``resourceContext``。用 :meth:`respond_resource` 回执；不挂回调不拦截。
+        """
+        return self.bind("webResourceRequested", handler)
+
+    def respond_resource(
+        self,
+        request_id: str,
+        action: str = "continue",
+        status: int | None = None,
+        content_type: str | None = None,
+        body: str | None = None,
+    ) -> None:
+        """回执一个被拦截的请求。
+
+        ``action`` 为 ``continue``（放行）、``cancel``（403）或 ``respond``
+        （用 status/content_type/body 直接构造响应）。
+        """
+        if action not in ("continue", "cancel", "respond"):
+            raise ValueError("action 只能是 continue / cancel / respond")
+        args: dict[str, Any] = {"requestId": str(request_id), "action": action}
+        if status is not None:
+            args["status"] = int(status)
+        if content_type is not None:
+            args["contentType"] = str(content_type)
+        if body is not None:
+            args["body"] = str(body)
+        self._app._send_invoke(self._id, "respond_resource", args)
 
     # ---- 下载：DownloadOperation 生命周期 ----
 

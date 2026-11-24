@@ -607,7 +607,52 @@ internal static class ExtendedEvents
                 element.DragLeave += (_, _) => post(null);
                 return true;
             case "drop":
-                element.Drop += (_, _) => post(new JsonObject { ["accepted"] = true });
+                element.Drop += (_, e) =>
+                {
+                    // 解析拖进来的内容：文件路径 + 文本。
+                    // 之前只报 accepted=true，拿不到用户拖了什么，上传/打开文件的
+                    // 场景完全做不了。解析失败也不影响 drop 本身。
+                    var files = new JsonArray();
+                    string? text = null;
+                    try
+                    {
+                        var view = e.Data?.GetView();
+                        if (view is not null)
+                        {
+                            if (view.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems))
+                            {
+                                var items = view.GetStorageItemsAsync().GetAwaiter().GetResult();
+                                foreach (var item in items)
+                                {
+                                    if (item is Windows.Storage.IStorageFile file)
+                                    {
+                                        files.Add(new JsonObject
+                                        {
+                                            ["path"] = file.Path,
+                                            ["name"] = file.Name,
+                                        });
+                                    }
+                                }
+                            }
+
+                            if (view.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Text))
+                            {
+                                text = view.GetTextAsync().GetAwaiter().GetResult();
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        HostLog.Write("[drop] 解析拖放内容失败: " + ex.Message);
+                    }
+
+                    post(new JsonObject
+                    {
+                        ["accepted"] = true,
+                        ["files"] = files,
+                        ["text"] = text,
+                    });
+                };
                 return true;
             default:
                 return false;

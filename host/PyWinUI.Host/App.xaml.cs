@@ -1,8 +1,10 @@
 using System.Runtime.InteropServices;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using PyWinUI.Host.Rendering;
 using Windows.Graphics;
@@ -94,6 +96,16 @@ public sealed partial class HostApp : Application
             ApplyInitialGeometry(silent: false);
             _window.Activate();
             _windowShown = true;
+
+            // 圆角是 XAML 合成出来的，Activate() 返回时首帧布局还没跑完，
+            // 这一瞬间窗口是直角（或白底）——延后一帧等布局完成，再让 DWM
+            // 把带圆角的结果提交上去，用户就不会看到「先直角后圆角」的跳变。
+            var queue = DispatcherQueue.GetForCurrentThread();
+            queue.TryEnqueue(() =>
+            {
+                (_window?.Content as FrameworkElement)?.UpdateLayout();
+                DwmFlush();
+            });
             HostLog.Write("OnLaunched: window activated");
         }
 
@@ -178,6 +190,13 @@ public sealed partial class HostApp : Application
                 : detail!);
         CenterWindow();
         _window.Activate();
+
+        // 同加载圈：等圆角布局完成再提交合成，避免先显示直角/无底色
+        DispatcherQueue.GetForCurrentThread().TryEnqueue(() =>
+        {
+            (_window.Content as FrameworkElement)?.UpdateLayout();
+            DwmFlush();
+        });
     }
 
     /// <summary>
@@ -297,9 +316,138 @@ public sealed partial class HostApp : Application
     }
 
     /// <summary>
+    /// 启动阶段两个窗口（加载圈 / 加载失败）共用的外壳。
+    ///
+    /// 这两个窗口和首帧后的主窗口走同一条路：CustomChrome 去掉了系统标题栏，
+    /// 自绘标题栏平时由 FormRenderer 在收到 render 时才建——启动阶段还没 render，
+    /// 于是窗口没有标题栏、拖不动也关不掉。这里补一个简版自绘标题栏。
+    /// 同时给内容垫一层带圆角的底色：窗口是真透明的，不垫底文字就飘在桌面上。
+    /// </summary>
+    private FrameworkElement BuildStartupShell(FrameworkElement content, string title)
+    {
+        var dark = Application.Current.RequestedTheme == ApplicationTheme.Dark;
+        var background = dark
+            ? Color.FromArgb(255, 0x20, 0x20, 0x20)
+            : Color.FromArgb(255, 0xFF, 0xFF, 0xFF);
+        var glyphColor = dark
+            ? Color.FromArgb(255, 0xF0, 0xF0, 0xF0)
+            : Color.FromArgb(255, 0x33, 0x33, 0x33);
+
+        // ---- 标题栏 ----
+        var titleBlock = new TextBlock
+        {
+            Text = title,
+            FontSize = 12,
+            Foreground = new SolidColorBrush(glyphColor),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(12, 0, 0, 0),
+        };
+
+        var closeGlyph = new FontIcon
+        {
+            Glyph = "\uE8BB",
+            FontSize = 10,
+            Foreground = new SolidColorBrush(glyphColor),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var closeBox = new Border
+        {
+            Width = 46,
+            Height = WindowChrome.TitleBarHeight,
+            Child = closeGlyph,
+            HorizontalAlignment = HorizontalAlignment.Right,
+        };
+        closeBox.PointerPressed += (_, e) => e.Handled = true;
+        closeBox.PointerReleased += (_, e) =>
+        {
+            e.Handled = true;
+            CloseStartupWindow();
+        };
+
+        var closeButtons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Stretch,
+        };
+        closeButtons.Children.Add(closeBox);
+
+        var bar = new Grid { Height = WindowChrome.TitleBarHeight };
+        bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(titleBlock, 0);
+        Grid.SetColumn(closeButtons, 1);
+        bar.Children.Add(titleBlock);
+        bar.Children.Add(closeButtons);
+
+        // 手动拖动：PointerPressed 记屏幕坐标与窗口位置，Moved 时 Move。
+        // 不用 WM_NCLBUTTONDOWN：CustomChrome 已把非客户区归零，那条路会失效。
+        bar.PointerPressed += (_, e) =>
+        {
+            e.Handled = true;
+            if (GetCursorPos(out var cursor))
+            {
+                _startupDrag = true;
+                _dragCursor = cursor;
+                _dragWindow = _window?.AppWindow.Position ?? default;
+            }
+        };
+        bar.PointerMoved += (_, _) =>
+        {
+            if (_startupDrag && _window is not null && GetCursorPos(out var cursor))
+            {
+                _window.AppWindow.Move(new PointInt32(
+                    _dragWindow.X + cursor.X - _dragCursor.X,
+                    _dragWindow.Y + cursor.Y - _dragCursor.Y));
+            }
+        };
+        void EndDrag()
+        {
+            _startupDrag = false;
+        }
+        bar.PointerReleased += (_, _) => EndDrag();
+        bar.PointerCaptureLost += (_, _) => EndDrag();
+
+        // ---- 两行：标题栏 + 内容 ----
+        var shell = new Grid
+        {
+            Background = new SolidColorBrush(background),
+            CornerRadius = new CornerRadius(8),
+        };
+        shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        shell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        Grid.SetRow(bar, 0);
+        Grid.SetRow(content, 1);
+        shell.Children.Add(bar);
+        shell.Children.Add(content);
+        return shell;
+    }
+
+    private bool _startupDrag;
+    private POINT _dragCursor;
+    private PointInt32 _dragWindow;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out POINT point);
+
+    [DllImport("dwmapi.dll")]
+    private static extern void DwmFlush();
+
+    /// <summary>启动阶段关闭窗口：直接退出进程，Python 侧会因管道断开而收尾。</summary>
+    private void CloseStartupWindow() => Application.Current.Exit();
+
+    /// <summary>
     /// 等待 Python 发来 render 之前的占位界面：居中转圈的加载指示器 + 一行说明。
     /// </summary>
-    private static FrameworkElement BuildLoadingView()
+    private FrameworkElement BuildLoadingView()
     {
         var ring = new ProgressRing
         {
@@ -326,27 +474,16 @@ public sealed partial class HostApp : Application
         stack.Children.Add(ring);
         stack.Children.Add(caption);
 
-        // 窗口现在是真透明的（WinUIEx 的 backdrop + 背景擦除），
-        // 光靠一个居中的 StackPanel 的话，窗口里就只剩一个圈在飘——
-        // 底下露的是桌面。这里自己垫一层白色圆角底。
-        var dark = Application.Current.RequestedTheme == ApplicationTheme.Dark;
-        var background = dark
-            ? Windows.UI.Color.FromArgb(255, 0x20, 0x20, 0x20)
-            : Windows.UI.Color.FromArgb(255, 0xFF, 0xFF, 0xFF);
-
-        return new Border
-        {
-            Background = new SolidColorBrush(background),
-            CornerRadius = new CornerRadius(12),
-            Child = stack,
-        };
+        // 底色和圆角交给 BuildStartupShell：那里同时补了标题栏，
+        // 加载圈窗口和失败页窗口才不会是「一个圈飘在透明窗口上」。
+        return BuildStartupShell(stack, "正在加载");
     }
 
     /// <summary>
     /// 启动失败界面：明确告诉用户没起来，并给出原因。
     /// 静默模式尤其需要它——否则失败就是「窗口不出现」，用户完全不知道发生了什么。
     /// </summary>
-    private static FrameworkElement BuildErrorView(string title, string detail)
+    private FrameworkElement BuildErrorView(string title, string detail)
     {
         var icon = new FontIcon
         {
@@ -387,6 +524,8 @@ public sealed partial class HostApp : Application
         stack.Children.Add(titleBlock);
         stack.Children.Add(detailBlock);
 
-        return stack;
+        // 之前直接返回 StackPanel：窗口透明 + 没有标题栏，
+        // 文字就飘在桌面上、拖不动也关不掉。统一套上启动期外壳。
+        return BuildStartupShell(stack, "加载失败");
     }
 }

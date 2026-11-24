@@ -192,6 +192,25 @@ internal static class CustomChrome
             HostLog.Write("[chrome] SetBorderAndTitleBar 失败: " + ex.Message);
         }
 
+        // 1b) 明确声明内容延伸到标题栏。
+        //
+        // Win11 上只清样式位不够稳：DWM 仍可能按系统标题栏预留一条区域，
+        // 表现为自绘标题栏上方多出一条空白，或者输入框/返回按钮点不到。
+        // 显式置一次 ExtendsContentIntoTitleBar，保证**所有平台**用的都是
+        // FormRenderer 自己画的那条标题栏。
+        try
+        {
+            var titleBar = window.AppWindow?.TitleBar;
+            if (titleBar is not null)
+            {
+                titleBar.ExtendsContentIntoTitleBar = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            HostLog.Write("[chrome] ExtendsContentIntoTitleBar 失败: " + ex.Message);
+        }
+
         // 2) 再补一刀 Win32 样式位，把系统边框相关的位清干净。
         StripBorderStyles(hwnd);
 
@@ -209,11 +228,11 @@ internal static class CustomChrome
         //    Win10 没有这个能力，圆角走自绘。
         ApplySystemBorder(hwnd, useSystemCorner: CanUseSystemCorner(embedded: false));
 
-        // 6) DWM 那一层我们自己补上：整窗扩展进玻璃层 + 空区域 blur behind。
+        // 6) DWM 那一层我们自己补上：空区域 blur behind。
         //
-        // WinUIEx 的 TransparentTintBackdrop 自己也会调一次 ConfigureDwm，
-        // 但它用的是 margins = 0（等于不扩展）。所以窗口打开之后我们再施加
-        // 一次 -1，把整窗送进玻璃层——这才是圆角外能透出桌面的关键。
+        // 注意 margins 用 0（不扩展）：扩展帧交给 WinUIEx 的
+        // TransparentTintBackdrop 处理，这里只补 blur behind 让 DWM 不铺底色。
+        // 曾经以为要传 -1，实际那样会把玻璃层铺满客户区、反而盖掉 XAML 内容。
         ApplyDwmTransparency(hwnd);
 
         // 裁掉窗口最外圈的脏边（只对顶层真实窗口，WS_CHILD 子窗口没有这问题）
@@ -293,6 +312,16 @@ internal static class CustomChrome
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    /// <summary>DIP → 物理像素（Win32 区域/几何一律用物理像素）。</summary>
+    private static int DipsToPixels(IntPtr hwnd, int dips)
+    {
+        var dpi = hwnd != IntPtr.Zero ? GetDpiForWindow(hwnd) : 0;
+        return dpi == 0 ? dips : (int)Math.Round(dips * dpi / 96.0);
+    }
+
     [DllImport("dwmapi.dll")]
     private static extern int DwmFlush();
 
@@ -334,14 +363,12 @@ internal static class CustomChrome
     /// <summary>
     /// 把 DWM 的透明配置施加到窗口上。
     ///
-    /// 关键在 <c>DwmExtendFrameIntoClientArea</c> 的边距：
+    /// <c>DwmExtendFrameIntoClientArea</c> 这里用 0（不扩展）：扩展帧由
+    /// WinUIEx 的 TransparentTintBackdrop 负责；这里真正起作用的是后面的
+    /// <c>DwmEnableBlurBehindWindow</c> + 空区域——让 DWM 不再铺窗口底色，
+    /// XAML 没画的地方（圆角外）才能透出桌面。
     ///
-    /// - <c>0</c>（四边都是 0）：等于**不扩展**。客户区不在玻璃层里，
-    ///   DWM 仍会自己铺一层窗口底色——圆角外就是一圈白。
-    /// - <c>-1</c>（四边都是 -1）：**整块客户区都扩展进 DWM 玻璃层**，
-    ///   玻璃层里没有内容的像素就是透明的。
-    ///
-    /// DWM 合成状态一变（焦点切换就会触发），这套配置会被重置，
+    /// DWM 合成状态一变（焦点切换就会触发），blur behind 配置会被重置，
     /// 窗口随即退回不透明白底——所以每次收到 WM_DWMCOMPOSITIONCHANGED 都要重做。
     /// </summary>
     private static void ApplyDwmTransparency(IntPtr hwnd)
@@ -437,7 +464,11 @@ internal static class CustomChrome
             return;
         }
 
-        if (width <= OuterTrim * 2 || height <= OuterTrim * 2)
+        // WindowChrome.OuterTrim 是 DIP（XAML 的 Padding 按 DIP 布局），
+        // 而 SetWindowRgn / WM_SIZE 的宽高都是物理像素。高 DPI 下必须换算，
+        // 否则裁的边比 XAML 留的透明边宽（或窄），边框线就错位。
+        var trim = DipsToPixels(hwnd, WindowChrome.OuterTrim);
+        if (width <= trim * 2 || height <= trim * 2)
         {
             // 尺寸还没就绪：把之前裁的区域清掉，别留个小的把窗口卡住
             SetWindowRgn(hwnd, IntPtr.Zero, false);
@@ -447,8 +478,7 @@ internal static class CustomChrome
         // 先把旧区域清掉，否则设不进去
         SetWindowRgn(hwnd, IntPtr.Zero, false);
 
-        var region = CreateRectRgn(
-            OuterTrim, OuterTrim, width - OuterTrim, height - OuterTrim);
+        var region = CreateRectRgn(trim, trim, width - trim, height - trim);
 
         if (region == IntPtr.Zero)
         {
@@ -462,7 +492,7 @@ internal static class CustomChrome
         }
     }
 
-    /// <summary>窗口最外圈要裁掉的像素。</summary>
+    /// <summary>窗口最外圈要裁掉的 DIP；用之前经 DipsToPixels 换成物理像素。</summary>
     private const int OuterTrim = WindowChrome.OuterTrim;
 
     /// <summary>
@@ -557,6 +587,44 @@ internal static class CustomChrome
 
     private static readonly HashSet<IntPtr> HookedWindows = new();
 
+    private const uint WM_NCHITTEST = 0x0084;
+    private const int HTTRANSPARENT = -1;
+
+    [DllImport("user32.dll")]
+    private static extern bool ScreenToClient(IntPtr hWnd, ref POINT point);
+
+    /// <summary>
+    /// 四角透明区让鼠标穿透：XAML 圆角裁剪只是不画像素，角上的矩形区域
+    /// 仍属于 HWND，不处理的话会挡住后面窗口的点击（尤其子窗口叠在一起时）。
+    /// </summary>
+    private static bool InRoundedCorner(IntPtr hwnd, int x, int y, int width, int height)
+    {
+        // 和渲染层 WindowCornerRadius 一致；最大化/Win11 系统圆角时不裁
+        if (IsWindows11 || (GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64() & 0x01000000L) != 0)
+        {
+            return false;
+        }
+
+        var radius = DipsToPixels(hwnd, 8);
+        if (radius <= 0)
+        {
+            return false;
+        }
+
+        // 只检查四个角的小方框
+        var cx = x < radius ? 0 : (x >= width - radius ? width : -1);
+        var cy = y < radius ? 0 : (y >= height - radius ? height : -1);
+        if (cx < 0 || cy < 0)
+        {
+            return false;
+        }
+
+        var dx = x - cx;
+        var dy = y - cy;
+        // 圆外（到角点的距离大于半径）才算透明区
+        return dx * dx + dy * dy > radius * radius;
+    }
+
     private static IntPtr OnNonClientMessage(
         IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam,
         UIntPtr idSubclass, IntPtr refData)
@@ -565,6 +633,26 @@ internal static class CustomChrome
         {
             // 客户区覆盖整个窗口，非客户区为 0
             return IntPtr.Zero;
+        }
+
+        if (msg == WM_NCHITTEST)
+        {
+            // lParam 是屏幕坐标，换成客户区坐标后判四角。
+            // 命中透明角就返回 HTTRANSPARENT 让消息落到下层窗口。
+            var pt = new POINT
+            {
+                X = unchecked((int)(long)lParam & 0xFFFF),
+                Y = unchecked(((int)(long)lParam >> 16) & 0xFFFF),
+            };
+            ScreenToClient(hWnd, ref pt);
+            if (GetClientRect(hWnd, out var client)
+                && InRoundedCorner(hWnd, pt.X, pt.Y,
+                    client.Right - client.Left, client.Bottom - client.Top))
+            {
+                return new IntPtr(HTTRANSPARENT);
+            }
+
+            return DefSubclassProc(hWnd, msg, wParam, lParam);  // 其余区域交给默认/后续子类
         }
 
         if (msg == WM_GETMINMAXINFO)
@@ -607,15 +695,18 @@ internal static class CustomChrome
             var newHeight = (int)((size >> 16) & 0xFFFF);
 
             ApplyOuterTrim(hWnd, newWidth, newHeight);
-            return IntPtr.Zero;
+
+            // 处理完继续往下传：WinUIEx 的 backdrop 等也挂了子类，
+            // 直接 return 会吞掉消息，让那些子类的状态跟不上。
+            return DefSubclassProc(hWnd, msg, wParam, lParam);
         }
 
         if (msg == WM_DWMCOMPOSITIONCHANGED)
         {
             // DWM 合成状态一变（焦点切换就会触发），blur behind 的配置会被重置，
-            // 窗口随即退回不透明的白底。这里立刻重做一遍。
+            // 窗口随即退回不透明的白底。这里立刻重做一遍，然后照样往下传。
             ApplyDwmTransparency(hWnd);
-            return IntPtr.Zero;
+            return DefSubclassProc(hWnd, msg, wParam, lParam);
         }
 
         // WM_ERASEBKGND 不拦：由 WinUIEx 的 TransparentTintBackdrop 处理，

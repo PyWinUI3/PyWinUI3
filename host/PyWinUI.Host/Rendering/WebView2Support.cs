@@ -35,6 +35,7 @@ internal static class WebView2Support
     {
         "webMessage", "contentLoading", "domContentLoaded", "processFailed",
         "newWindowRequested", "downloadStarting", "downloadProgress", "downloadStateChanged",
+        "permissionRequested", "webResourceRequested",
     };
 
     private sealed class State
@@ -46,6 +47,8 @@ internal static class WebView2Support
         public readonly Dictionary<string, JsonNode?> Pending = new(StringComparer.Ordinal);
         public readonly Dictionary<string, NewWindowRequest> Windows = new(StringComparer.Ordinal);
         public readonly Dictionary<string, DownloadEntry> Downloads = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, PermissionRequest> Permissions = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, ResourceRequest> Resources = new(StringComparer.Ordinal);
         public bool CoreWired;
     }
 
@@ -53,6 +56,22 @@ internal static class WebView2Support
     {
         public WebView2 Web = null!;
         public CoreWebView2NewWindowRequestedEventArgs Args = null!;
+        public Deferral Deferral = null!;
+        public DispatcherTimer? Timer;
+    }
+
+    private sealed class PermissionRequest
+    {
+        public WebView2 Web = null!;
+        public CoreWebView2PermissionRequestedEventArgs Args = null!;
+        public Deferral Deferral = null!;
+        public DispatcherTimer? Timer;
+    }
+
+    private sealed class ResourceRequest
+    {
+        public WebView2 Web = null!;
+        public CoreWebView2WebResourceRequestedEventArgs Args = null!;
         public Deferral Deferral = null!;
         public DispatcherTimer? Timer;
     }
@@ -178,6 +197,8 @@ internal static class WebView2Support
 
         core.NewWindowRequested += (_, e) => OnNewWindow(web, state, e);
         core.DownloadStarting += (_, e) => OnDownloadStarting(web, state, e);
+        core.PermissionRequested += (_, e) => OnPermissionRequested(web, state, e);
+        core.WebResourceRequested += (_, e) => OnWebResourceRequested(web, state, e);
     }
 
     private static void Emit(State state, string eventName, JsonObject data)
@@ -343,7 +364,9 @@ internal static class WebView2Support
         {
             if (!state.Events.Contains("newWindowRequested"))
             {
-                RespondNewWindow(web, id, false, null);
+                // 没挂回调 = 浏览器最自然的默认行为：在原视图里打开目标地址。
+                // 之前是拒绝（window.open 静默失效），对浏览器场景不对。
+                RespondNewWindow(web, id, true, null);
                 return;
             }
 
@@ -393,6 +416,256 @@ internal static class WebView2Support
             }
         });
     }
+
+    // ------------------------------------------------------------------
+    // 权限：Python 可选回执
+    // ------------------------------------------------------------------
+
+    private static void OnPermissionRequested(
+        WebView2 web, State state, CoreWebView2PermissionRequestedEventArgs args)
+    {
+        var deferral = args.GetDeferral();
+        var id = NextId("p");
+        var entry = new PermissionRequest
+        {
+            Web = web,
+            Args = args,
+            Deferral = deferral,
+        };
+        state.Permissions[id] = entry;
+
+        OnUi(web, () =>
+        {
+            if (!state.Events.Contains("permissionRequested"))
+            {
+                // 没挂回调：保留系统默认行为（WebView2 自己按站点权限决定）
+                CompletePermission(web, id, null);
+                return;
+            }
+
+            Emit(state, "permissionRequested", new JsonObject
+            {
+                ["requestId"] = id,
+                ["kind"] = args.PermissionKind.ToString(),
+                ["uri"] = args.Uri ?? "",
+                ["isUserInitiated"] = args.IsUserInitiated,
+            });
+
+            // 8 秒没回执：保持默认，不让 deferral 永远挂着
+            entry.Timer = OneShot(
+                TimeSpan.FromSeconds(8),
+                () => CompletePermission(web, id, null));
+        });
+    }
+
+    /// <summary>allow=null 表示不干预，交给 WebView2 默认行为。</summary>
+    public static void RespondPermission(WebView2 web, string id, bool? allow)
+    {
+        if (!States.TryGetValue(web, out var state)
+            || !state.Permissions.TryGetValue(id, out var entry))
+        {
+            return;
+        }
+
+        state.Permissions.Remove(id);
+        entry.Timer?.Stop();
+        CompletePermission(web, id, allow, entry);
+    }
+
+    private static void CompletePermission(WebView2 web, string id, bool? allow, PermissionRequest? entry = null)
+    {
+        if (entry is null
+            && (!States.TryGetValue(web, out var s) || !s.Permissions.Remove(id)))
+        {
+            return;
+        }
+
+        entry ??= States.TryGetValue(web, out var s2)
+            && s2.Permissions.TryGetValue(id, out var e) ? e : null;
+        if (entry is null)
+        {
+            return;
+        }
+
+        OnUi(web, () =>
+        {
+            try
+            {
+                if (allow is { } decision)
+                {
+                    entry.Args.State = decision
+                        ? CoreWebView2PermissionState.Allow
+                        : CoreWebView2PermissionState.Deny;
+                }
+            }
+            finally
+            {
+                entry.Deferral.Complete();
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // 资源拦截：Python 可选回执
+    // ------------------------------------------------------------------
+
+    private static void OnWebResourceRequested(
+        WebView2 web, State state, CoreWebView2WebResourceRequestedEventArgs args)
+    {
+        // 没挂回调就不设 AddWebResourceRequestedFilter，事件根本不会触发；
+        // 走到这里说明有订阅（或订阅后取消），还是按订阅状态分流。
+        var deferral = args.GetDeferral();
+        var id = NextId("r");
+        var entry = new ResourceRequest
+        {
+            Web = web,
+            Args = args,
+            Deferral = deferral,
+        };
+        state.Resources[id] = entry;
+
+        OnUi(web, () =>
+        {
+            if (!state.Events.Contains("webResourceRequested"))
+            {
+                CompleteResource(web, id, null, null, null, null, entry);
+                return;
+            }
+
+            var req = args.Request;
+            Emit(state, "webResourceRequested", new JsonObject
+            {
+                ["requestId"] = id,
+                ["url"] = req?.Uri ?? "",
+                ["method"] = req?.Method ?? "",
+                ["headers"] = HeaderObject(req?.Headers),
+                ["resourceContext"] = args.ResourceContext.ToString(),
+            });
+
+            entry.Timer = OneShot(
+                TimeSpan.FromSeconds(8),
+                () => CompleteResource(web, id, null, null, null, null, entry));
+        });
+    }
+
+    private static JsonObject HeaderObject(CoreWebView2HttpRequestHeaders? headers)
+    {
+        var obj = new JsonObject();
+        if (headers is null)
+        {
+            return obj;
+        }
+
+        try
+        {
+            foreach (var pair in headers)
+            {
+                obj[pair.Key] = pair.Value;
+            }
+        }
+        catch
+        {
+            // 枚举头文件失败不该影响请求本身
+        }
+
+        return obj;
+    }
+
+    /// <summary>回执：action = continue / cancel / respond；后两者带 status/contentType/body。</summary>
+    public static void RespondResource(
+        WebView2 web, string id, string action,
+        int? status, string? contentType, string? body)
+    {
+        if (!States.TryGetValue(web, out var state)
+            || !state.Resources.TryGetValue(id, out var entry))
+        {
+            return;
+        }
+
+        state.Resources.Remove(id);
+        entry.Timer?.Stop();
+        CompleteResource(web, id, action, status, contentType, body, entry);
+    }
+
+    private static void CompleteResource(
+        WebView2 web, string id,
+        string? action, int? status, string? contentType, string? body,
+        ResourceRequest? entry = null)
+    {
+        if (entry is null
+            && (!States.TryGetValue(web, out var s) || !s.Resources.Remove(id)))
+        {
+            return;
+        }
+
+        entry ??= States.TryGetValue(web, out var s2)
+            && s2.Resources.TryGetValue(id, out var e) ? e : null;
+        if (entry is null)
+        {
+            return;
+        }
+
+        OnUi(web, () =>
+        {
+            try
+            {
+                if (action is "cancel")
+                {
+                    // 用空响应 + 失败状态码取消请求
+                    ApplyResponse(entry.Args, 403, "text/plain", "");
+                }
+                else if (action is "respond")
+                {
+                    ApplyResponse(
+                        entry.Args,
+                        status ?? 200,
+                        contentType ?? "text/plain",
+                        body ?? "");
+                }
+                // continue / null：不改 Response，交给网络栈
+            }
+            catch (Exception ex)
+            {
+                HostLog.Write($"[webview2] 资源回执 {id} 失败: {ex.Message}");
+            }
+            finally
+            {
+                entry.Deferral.Complete();
+            }
+        });
+    }
+
+    private static void ApplyResponse(
+        CoreWebView2WebResourceRequestedEventArgs args,
+        int status, string contentType, string body)
+    {
+        // WebResourceRequested 的 args.Response 默认就是一个可写的空响应，
+        // 直接改它的字段即可——WinUI 3 投影没有 CreateWebResourceResponse。
+        var response = args.Response;
+        if (response is null)
+        {
+            return;
+        }
+
+        response.StatusCode = status;
+        response.ReasonPhrase = ReasonPhrase(status);
+        response.Content = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(body))
+            .AsRandomAccessStream();
+        // WinUI 3 投影里 Headers 只有 AppendHeader 可写
+        response.Headers.AppendHeader("Content-Type", contentType);
+    }
+
+    private static string ReasonPhrase(int status) => status switch
+    {
+        200 => "OK",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
 
     // ------------------------------------------------------------------
     // 下载：DownloadOperation 生命周期
@@ -551,7 +824,7 @@ internal static class WebView2Support
         {
             if (web.CoreWebView2 is null)
             {
-                await web.EnsureCoreWebView2Async();
+                await WebView2Runtime.EnsureCore(web);
             }
 
             if (web.CoreWebView2 is { } core)

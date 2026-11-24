@@ -94,7 +94,7 @@ Python                          Host
 #### `hello` — 握手
 
 ```json
-{ "op": "hello", "protocol": 1, "client": "pywinui3/1.0.0-rc1", "pid": 12345 }
+{ "op": "hello", "protocol": 1, "client": "pywinui3/1.0.0rc2", "pid": 12345 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -193,7 +193,9 @@ Python 侧默认开启 **16 ms 合并窗口**：同一帧里对同一节点的�
 | `execute_script` | `WebView2` | `{"script": "...", "requestId": "r1"}`；结果以 `scriptResult` 回推并带回 `requestId` |
 | `post_web_message` | `WebView2` | `{"message": ...}` |
 | `open_devtools` | `WebView2` | — |
-| `respond_new_window` | `WebView2` | `{"requestId": "...", "allow": true, "url": "..."}` |
+| `respond_new_window` | `WebView2` | `{"requestId": "...", "allow": true, "url": "..."}`；不回执时 8 秒按拒绝 |
+| `respond_permission` | `WebView2` | `{"requestId": "...", "allow": true}`；不回执时 8 秒保持默认 |
+| `respond_resource` | `WebView2` | `{"requestId": "...", "action": "continue\|cancel\|respond", "status": 200, "contentType": "text/html", "body": "..."}` |
 | `respond_download` | `WebView2` | `{"downloadId": "...", "allow": true, "filePath": "..."}` |
 | `download_action` | `WebView2` | `{"downloadId": "...", "action": "cancel\|pause\|resume"}` |
 | `select_range` | `Entry` | `{"start": 0, "length": 3}` |
@@ -376,7 +378,7 @@ picker（标题被忽略）。用户取消时回 `ok=false`，`paths` 为空。
 {
   "t": "ready",
   "protocol": 1,
-  "host": "PyWinUI.Host/1.0.0-rc1",
+  "host": "PyWinUI.Host/1.0.0rc2",
   "os": { "version": "10.0.19044", "build": 19044 },
   "capabilities": {
     "mica": false,
@@ -528,6 +530,8 @@ Python 侧据此抑制双向绑定回环。
 | `parent` | string | — | 父窗口的会话 id。给了就嵌成 WS_CHILD 子窗口，不再是独立顶层窗口 |
 | `layer` | string | `highest` | 嵌入子窗口的 z 序：`highest` / `lowest`。TOPMOST 对 WS_CHILD 无效，不开放 |
 | `maximizeRequestable` | bool | `false` | 是否启用标题栏最大化按钮并把它交给 Python 回调。**默认禁用**，见下方说明 |
+| `returnButton` | bool | `false` | 在应用图标左边显示返回按钮，点击发 `returnRequested`。兼容拼错的 `RetrunButtom` |
+| `textInputBox` | bool | `false` | 在标题右侧显示带放大镜图标的输入框，发 `textInputChanged` / `textInputSubmitted`。兼容 `TextInputBox` |
 
 窗口尺寸上限（`maxWidth` / `maxHeight`）没有对应字段：`AppWindow` 不提供这个能力，只能靠
 Win32 子类化拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
@@ -543,6 +547,16 @@ Win32 子类化拦 `WM_GETMINMAXINFO`，代价与收益不成比例。
 `patch` 的 `window` 操作把这一位置成 `true`；之后点按钮，宿主发 `maximizeRequested` 事件
 （带 `data.maximized` 表示当前状态），由回调自己决定调 `maximize()` 还是 `restore()`。
 `on_maximize_request(None)` 会把它改回 `false`。
+
+`returnButton` / `textInputBox` 则是**纯显示开关**：宿主照常画出部件，点击/输入一律
+通过事件交给 Python，自己不改窗口状态。两者都可以在首帧的 `spec` 里给，也可以用
+`patch` 的 `window` 操作在运行期切换（部件始终存在，只切可见性）。任一为真时
+标题栏高度从 32 加到 46，运行期切换同步生效。
+
+Python 侧要求**启用即挂回调**：`returnButton=True` 必须注册 `on_return_request`，
+`textInputBox=True` 必须注册 `on_text_input` 或 `on_text_changed`，否则 render 时
+抛 `ValueError`。撤销最后一个回调时 Python 会自动发 `patch` 把该属性置 `false`
+并立即 flush——这就是「实时隐藏」的实际通路。
 
 ### 3.2 Node
 
@@ -1125,8 +1139,8 @@ Python 真的 `bind()` 了对应事件名才往管道推；设置属性如果来
 
 - `allow=true` → 在**当前视图**导航过去（可用 `url` 覆盖目标）；
 - `allow=false` → 丢弃这次开窗；
-- 没订阅 `newWindowRequested` 时直接按拒绝处理；
-- 8 秒没回执自动按拒绝处理，deferral 不会永远挂着。
+- **没订阅 `newWindowRequested` 时按浏览器默认行为，在当前视图打开目标地址**；
+- 订阅了但 8 秒没回执按拒绝处理，deferral 不会永远挂着。
 
 当前模型是「一个节点一个 WebView2」，不会真的创建第二个浏览器窗口。
 
@@ -1140,13 +1154,22 @@ Python 真的 `bind()` 了对应事件名才往管道推；设置属性如果来
 **脚本结果配对**：`execute_script` 的 `requestId` 会原样出现在 `scriptResult` 里，并发执行
 多段脚本不会混淆；不传时行为与以前一致。
 
+**权限与资源拦截**（都是可选挂接，和下载同一套 deferral + 8 秒超时）：
+
+- `permissionRequested`：订阅后回 `permissionRequested` 事件（带 `requestId` / `kind` /
+  `uri` / `isUserInitiated`），Python 用 `respond_permission` 决定允许/拒绝；
+  不订阅时不挂监听器，交给 WebView2 默认行为。
+- `webResourceRequested`：订阅后才注册过滤器，回 `requestId` / `url` / `method` /
+  `headers` / `resourceContext`，Python 用 `respond_resource` 放行、取消（403）或
+  直接给响应（status / contentType / body）；不订阅则不拦截。
+
 **诚实限制**：
 
-- `permissionRequested` 暂未接（需要异步 deferral + 超时策略，本期不做）；
+- 证书错误通过启动参数 `--ignore-certificate-errors` 放行（自定义
+  `CoreWebView2Environment`，进程级缓存）；**HTTP 认证仍未实现**；
 - WinUI 3 的 WebView2 投影没有暴露 `CoreWebView2Controller`，因此**不提供程序化
   `zoomFactor`**，只有 `isZoomControlEnabled` 控制用户 Ctrl+滚轮缩放；
-- `WebResourceRequested` 拦截、`addHostObjectToScript`、证书 / HTTP 认证、完整多窗口仍未
-  实现（见第 8 章）。
+- `addHostObjectToScript`、完整多窗口仍未实现（见第 8 章）。
 
 ### 3.6 值类型约定
 
@@ -1229,7 +1252,8 @@ null。这些读取全部在 UI 线程同步完成，因此 `query` 里不能放
 | `gotFocus` / `lostFocus` | 任意节点 | `{}`，`focus`/`blur` 的别名 |
 | `textChanging` | TextBox | `{ "text": "..." }` |
 | `loaded` / `unloaded` | 任意节点 | `loaded` 带 `{width,height}`，`unloaded` 为 `{}` |
-| `dragEnter` / `dragOver` / `dragLeave` / `drop` | 任意节点（先 `allowDrop=true`） | `{ "accepted": true }` |
+| `dragEnter` / `dragOver` / `dragLeave` / `drop` | 任意节点（先 `allowDrop=true`） | `drop` 带解析后的内容，见下方 |
+| | | `{"accepted": true, "files": [{"path": "...", "name": "..."}], "text": "..."}`；`text` 无文本时为 `null` |
 | `tapped` / `doubleTapped` / `rightTapped` | 任意节点 | `{ "x": 12.0, "y": 8.0 }` |
 | `pointerMoved` / `pointerReleased` / `pointerWheelChanged` | 任意节点 | `{x,y}`，滚轮额外带 `delta` |
 | `contextRequested` | 任意节点 | `{}` |
@@ -1290,13 +1314,18 @@ null。这些读取全部在 UI 线程同步完成，因此 `query` 里不能放
 |---|---|---|
 | `closeRequested` | 用户点标题栏关闭按钮 | `null` |
 | `maximizeRequested` | 用户点标题栏最大化/还原按钮，或双击标题栏 | `{"maximized": bool}` 表示当前是否最大化 |
+| `returnRequested` | 用户点应用图标左边的返回按钮 | `null` |
+| `textInputChanged` | 标题栏输入框内容变化（每次输入） | `{"text": string}` |
+| `textInputSubmitted` | 在标题栏输入框里按回车 | `{"text": string}` |
 
-这两条事件**只发给对应会话的根节点**，且不受节点的 `events` 映射影响——Python 侧由
-`Window.on_close_request()` / `Window.on_maximize_request()` 专门接管：
+这几条事件**只发给对应会话的根节点**，且不受节点的 `events` 映射影响——Python 侧由
+`Window.on_close_request()` / `Window.on_maximize_request()` / `Window.on_return_request()` /
+`Window.on_text_input()` / `Window.on_text_changed()` 专门接管：
 
 - `closeRequested`：没注册回调时默认直接关窗；注册后可以拦下来询问用户。
 - `maximizeRequested`：没注册回调时按钮是**禁用**的，根本收不到事件；
   注册后由回调自己决定最大化还是还原（见 3.1 节的 `maximizeRequestable`）。
+- 后三条：按钮/输入框照常显示，没注册回调只是没有动作；宿主不会替 Python 做决定。
 
 ### 4.3 回声抑制
 
@@ -1360,8 +1389,8 @@ win.mainloop()
 对应线上流量：
 
 ```
-→ {"op":"hello","protocol":1,"client":"pywinui3/1.0.0-rc1","pid":8123}
-← {"t":"ready","protocol":1,"host":"PyWinUI.Host/1.0.0-rc1","os":{"version":"10.0.19044","build":19044},"capabilities":{"mica":false,"acrylic":true,"roundedCorners":false,"backdrop":"acrylic"}}
+→ {"op":"hello","protocol":1,"client":"pywinui3/1.0.0rc2","pid":8123}
+← {"t":"ready","protocol":1,"host":"PyWinUI.Host/1.0.0rc2","os":{"version":"10.0.19044","build":19044},"capabilities":{"mica":false,"acrylic":true,"roundedCorners":false,"backdrop":"acrylic"}}
 → {"op":"render","rev":1,"window":{"title":"Demo","width":640,"height":480,"backdrop":"auto"},"root":"n0","nodes":[{"id":"n0","type":"Column","props":{"padding":24,"spacing":12},"children":["n1","n2"]},{"id":"n1","type":"Label","props":{"text":"你好","fontSize":28}},{"id":"n2","type":"Button","props":{"text":"点我"},"events":{"click":"h1"}}]}
 ← {"t":"ack","rev":1}
 ← {"t":"event","id":"n2","event":"click","rev":1,"data":{}}

@@ -61,6 +61,28 @@ internal static class EmbeddedWindow
     /// </summary>
     private static readonly Dictionary<IntPtr, List<IntPtr>> Siblings = new();
 
+    /// <summary>
+    /// 每扇窗口当前的标题栏高度。渲染层在开关返回按钮/输入框时更新，
+    /// 子窗口据此决定「再往上就压到父窗口标题栏」的禁区。
+    /// 默认 32，和 WindowChrome 里的紧凑高度一致。
+    /// </summary>
+    private static readonly Dictionary<IntPtr, int> TitleBarHeights = new();
+
+    /// <summary>由渲染层登记窗口的标题栏高度。</summary>
+    public static void SetTitleBarHeight(IntPtr hwnd, int height)
+    {
+        if (hwnd != IntPtr.Zero)
+        {
+            TitleBarHeights[hwnd] = Math.Max(0, height);
+        }
+    }
+
+    /// <summary>读一扇窗口的标题栏高度，没登记过就用默认紧凑高度。</summary>
+    private static int TitleBarHeightOf(IntPtr hwnd) =>
+        hwnd != IntPtr.Zero && TitleBarHeights.TryGetValue(hwnd, out var height)
+            ? height
+            : WindowChrome.TitleBarHeight;
+
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT
     {
@@ -319,9 +341,6 @@ internal static class EmbeddedWindow
 
     private const long WS_MAXIMIZE = 0x01000000L;
 
-    /// <summary>标题栏高度，用来在还原后把光标对到标题栏中间。</summary>
-    private const int TitleBarHeight = WindowChrome.TitleBarHeight;
-
     /// <summary>
     /// 窗口是最大化状态时，先还原，再把窗口挪到光标位置。
     ///
@@ -462,7 +481,7 @@ internal static class EmbeddedWindow
 
                 // 上边缘不给到 0：父窗口的标题栏占着最上面一条，
                 // 子窗口爬上去会压住标题栏（标题、按钮都在那儿）。
-                var topLimit = WindowChrome.TitleBarHeight;
+                var topLimit = TitleBarHeightOf(parentHwnd);
 
                 target.X = Math.Clamp(target.X - trim, 0, maxX) + trim;
                 target.Y = Math.Clamp(target.Y - trim, topLimit, maxY) + trim;
@@ -652,7 +671,7 @@ internal static class EmbeddedWindow
         var trim = ParentTrim(parentHwnd);
 
         // 上边缘同样不让到 0——别把子窗口摆在父窗口的标题栏上。
-        var top = Math.Max(y, WindowChrome.TitleBarHeight);
+        var top = Math.Max(y, TitleBarHeightOf(parentHwnd));
 
         SetWindowPos(childHwnd, insertAfter, x + trim, top + trim, w, h,
             SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);

@@ -14,6 +14,20 @@ from .app import App
 from .widgets import Widget, camelize, normalize_value
 
 
+#: 标题栏两个新属性的别名。早期示例把 ReturnButton 写成了 RetrunButtom，
+#: 这里一并收下，避免用户照着旧代码写时静默失效。
+_TITLE_BAR_KEYS = {
+    "returnbutton": "returnButton",
+    "retrunbuttom": "returnButton",
+    "textinputbox": "textInputBox",
+}
+
+
+def _window_key(name: str) -> str:
+    """窗口属性名 → 协议里的驼峰名。"""
+    return _TITLE_BAR_KEYS.get(name.replace("_", "").lower(), camelize(name))
+
+
 class Window(Widget):
     """顶层窗口。
 
@@ -77,6 +91,13 @@ class Window(Widget):
             "minimizable",
             "maximizable",
             "maximize_requestable",
+            "return_button",
+            "retrun_buttom",
+            "returnButton",
+            "RetrunButtom",
+            "text_input_box",
+            "textInputBox",
+            "TextInputBox",
             "maximized",
             "scroll",
             "theme",
@@ -135,6 +156,9 @@ class Window(Widget):
         # 关闭按钮的接管回回调；None 表示默认行为（直接关）
         self._close_request_handler: Callable[..., Any] | None = None
         self._maximize_request_handler: Callable[..., Any] | None = None
+        self._return_request_handler: Callable[..., Any] | None = None
+        self._text_input_handler: Callable[..., Any] | None = None
+        self._text_changed_handler: Callable[..., Any] | None = None
 
         self._window_props: dict[str, Any] = {
             "title": title,
@@ -151,7 +175,7 @@ class Window(Widget):
         # 窗口专属属性从 kwargs 里摘出来，剩下的当成容器属性
         for key in list(kwargs):
             if key in self._WINDOW_ATTRS:
-                self._window_props[camelize(key)] = normalize_value(kwargs.pop(key))
+                self._window_props[_window_key(key)] = normalize_value(kwargs.pop(key))
 
         if kwargs:
             from .widgets import build_props
@@ -167,8 +191,31 @@ class Window(Widget):
 
     # ---- 窗口属性 ----
 
+    def _check_title_bar_handlers(self, props: dict[str, Any]) -> None:
+        """两个扩展部件必须挂回调。
+
+        宿主只发事件、不代替用户做决定；没挂回调的话按钮点了没反应、
+        输入框打了字没人收，等于一个坏控件。构造时不查（用户要等构造完
+        才能挂回调），在 render 和运行期 configure 开启时查。
+        """
+        if props.get("returnButton") and self._return_request_handler is None:
+            raise ValueError(
+                "return_button=True 必须先调用 win.on_return_request(callback) 挂接回调；"
+                "宿主不会自己处理返回动作"
+            )
+        if props.get("textInputBox") and not (
+            self._text_input_handler or self._text_changed_handler
+        ):
+            raise ValueError(
+                "text_input_box=True 必须先调用 win.on_text_input(callback) "
+                "或 win.on_text_changed(callback) 挂接回调；"
+                "宿主不会自己接收输入"
+            )
+
     def _window_spec(self) -> dict[str, Any]:
-        return dict(self._window_props)
+        props = dict(self._window_props)
+        self._check_title_bar_handlers(props)
+        return props
 
     def configure(self, **kwargs: Any) -> None:
         # 父子关系是建窗时定死的：子 HWND 已经 SetParent 到父窗口上，
@@ -182,11 +229,14 @@ class Window(Widget):
 
         for key, value in kwargs.items():
             if key in self._WINDOW_ATTRS:
-                window_props[camelize(key)] = normalize_value(value)
+                window_props[_window_key(key)] = normalize_value(value)
             else:
                 node_props[camelize(key)] = normalize_value(value)
 
         if window_props:
+            # 运行期开启扩展部件时同样要求已挂回调（关闭不查）
+            merged = {**self._window_props, **window_props}
+            self._check_title_bar_handlers(merged)
             self._window_props.update(window_props)
             self._app._send_patch([protocol.op_window(window_props)])
 
@@ -199,7 +249,7 @@ class Window(Widget):
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):
             raise AttributeError(name)
-        key = camelize(name)
+        key = _window_key(name)
         window_props = self.__dict__.get("_window_props", {})
         if key in window_props:
             return window_props[key]
@@ -292,6 +342,61 @@ class Window(Widget):
                 [protocol.op_window({"maximizeRequestable": requestable})]
             )
 
+    def on_return_request(self, callback: Callable[..., None] | None) -> None:
+        """接管标题栏应用图标左边的返回按钮。
+
+        宿主自己不会动窗口，只发 ``returnRequested``，由你决定返回到哪::
+
+            w.on_return_request(lambda e: w.close())
+
+        按钮要先用 ``return_button=True`` 打开。传 None 会**立刻隐藏**按钮
+        （等价于 ``configure(return_button=False)``），不会留一个点了没反应的空按钮。
+        """
+        self._return_request_handler = callback
+        self._sync_title_bar("returnButton", callback is not None)
+
+    def on_text_input(self, callback: Callable[..., None] | None) -> None:
+        """标题栏输入框里按下回车时回调，``e.data["text"]`` 是当前文本。
+
+        输入框要先用 ``text_input_box=True`` 打开::
+
+            def submit(e):
+                print("搜索:", e.data.get("text", ""))
+
+            w.on_text_input(submit)
+        """
+        self._text_input_handler = callback
+        # 两个输入回调都没了才隐藏输入框——只撤一个不算
+        self._sync_title_bar(
+            "textInputBox",
+            callback is not None or self._text_changed_handler is not None,
+        )
+
+    def on_text_changed(self, callback: Callable[..., None] | None) -> None:
+        """标题栏输入框的内容每次变化都回调，``e.data["text"]`` 是新文本。"""
+        self._text_changed_handler = callback
+        self._sync_title_bar(
+            "textInputBox",
+            callback is not None or self._text_input_handler is not None,
+        )
+
+    def _sync_title_bar(self, key: str, has_handler: bool) -> None:
+        """撤掉最后一个回调时自动隐藏部件。
+
+        只管「关」不管「开」：挂回调只是登记处理函数，不该反过来把
+        用户没开的部件自动显示出来。开启仍由 return_button/text_input_box
+        属性显式控制。
+        """
+        if has_handler or not self._window_props.get(key):
+            return
+
+        self._window_props[key] = False
+        # 必须立刻 flush：configure() 走 16ms 合并窗口，
+        # 紧接着的 render()/事件循环会让隐藏晚一帧，看起来像没生效。
+        if self._app is not None and self._app._host is not None:
+            self._app._send_patch([protocol.op_window({key: False})])
+            self._app._flush_patches()
+
     def _on_event(self, event: Any) -> None:
         # 自绘标题栏的关闭按钮走这里，而不是用户 bind 的事件通道
         if getattr(event, "name", None) == "closeRequested":
@@ -304,6 +409,24 @@ class Window(Widget):
 
         if getattr(event, "name", None) == "maximizeRequested":
             handler = self._maximize_request_handler
+            if handler is not None:
+                handler(event)
+            return
+
+        if getattr(event, "name", None) == "returnRequested":
+            handler = self._return_request_handler
+            if handler is not None:
+                handler(event)
+            return
+
+        if getattr(event, "name", None) == "textInputSubmitted":
+            handler = self._text_input_handler
+            if handler is not None:
+                handler(event)
+            return
+
+        if getattr(event, "name", None) == "textInputChanged":
+            handler = self._text_changed_handler
             if handler is not None:
                 handler(event)
             return

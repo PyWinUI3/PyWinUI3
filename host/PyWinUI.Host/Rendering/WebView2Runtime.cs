@@ -1,4 +1,6 @@
 using Microsoft.Win32;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.UI.Xaml.Controls;
 
 namespace PyWinUI.Host.Rendering;
 
@@ -26,7 +28,54 @@ internal static class WebView2Runtime
 
     private static readonly Lazy<bool> Available = new(Detect);
 
+    /// <summary>
+    /// 允许自签名 / 过期证书：开发环境常要访问内网 HTTPS 站点，
+    /// WebView2 默认会拦下来显示证书错误页。这里通过环境参数放行。
+    /// 环境进程级缓存，所有 WebView2 共用。
+    /// </summary>
+    private static readonly Lazy<Task<CoreWebView2Environment?>> CachedEnv =
+        new(() => CreateEnvironment());
+
     public static bool IsAvailable => Available.Value;
+
+    private static async Task<CoreWebView2Environment?> CreateEnvironment()
+    {
+        try
+        {
+            var options = new CoreWebView2EnvironmentOptions
+            {
+                AdditionalBrowserArguments = "--ignore-certificate-errors",
+            };
+
+            // 带选项的入口叫 CreateWithOptionsAsync，不是 CreateAsync 的重载
+            return await CoreWebView2Environment.CreateWithOptionsAsync(
+                null, null, options);
+        }
+        catch (Exception ex)
+        {
+            HostLog.Write("[webview2] 创建环境失败（证书放行不可用）: " + ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>用带证书放行的环境初始化 WebView2；创建失败时退回默认初始化。</summary>
+    public static async Task EnsureCore(WebView2 web)
+    {
+        if (web.CoreWebView2 is not null)
+        {
+            return;
+        }
+
+        var environment = await CachedEnv.Value;
+        if (environment is not null)
+        {
+            await web.EnsureCoreWebView2Async(environment);
+        }
+        else
+        {
+            await web.EnsureCoreWebView2Async();
+        }
+    }
 
     public static bool ForceFallback =>
         string.Equals(Environment.GetEnvironmentVariable(ForceFallbackEnv), "1", StringComparison.Ordinal);

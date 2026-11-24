@@ -13,7 +13,7 @@ import json
 from typing import Any, Iterable
 
 PROTOCOL_VERSION = 1
-CLIENT_ID = "pywinui3/1.0.0-rc1"
+CLIENT_ID = "pywinui3/1.0.0rc2"
 
 #: 单行消息字节上限，与 C# 侧 Wire.MaxLineBytes 一致。
 MAX_LINE_BYTES = 8 * 1024 * 1024

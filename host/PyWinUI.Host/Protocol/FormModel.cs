@@ -33,6 +33,19 @@ public sealed class WindowSpec
     /// 要不要最大化，只有 Python 那边挂了回调才启用。
     /// </summary>
     public bool? MaximizeRequestable { get; set; }
+
+    /// <summary>
+    /// 标题栏应用图标左边显示一个「返回」按钮。
+    /// 点击不直接做任何事，宿主发 <c>returnRequested</c> 交给 Python 回调。
+    /// </summary>
+    public bool? ReturnButton { get; set; }
+
+    /// <summary>
+    /// 标题文字右边显示一个带放大镜图标的输入框。
+    /// 输入时发 <c>textInputChanged</c>，回车时发 <c>textInputSubmitted</c>。
+    /// </summary>
+    public bool? TextInputBox { get; set; }
+
     public bool? Minimizable { get; set; }
     public bool? Maximizable { get; set; }
 

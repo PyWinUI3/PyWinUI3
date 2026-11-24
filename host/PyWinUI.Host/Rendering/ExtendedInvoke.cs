@@ -160,6 +160,31 @@ internal static class ExtendedInvoke
                 }
                 return true;
 
+            case "respond_permission":
+                if (element is WebView2 permWeb
+                    && ValueParsers.AsString(args?["requestId"]) is { } permId)
+                {
+                    WebView2Support.RespondPermission(
+                        permWeb,
+                        permId,
+                        ValueParsers.AsBool(args?["allow"]));
+                }
+                return true;
+
+            case "respond_resource":
+                if (element is WebView2 resWeb
+                    && ValueParsers.AsString(args?["requestId"]) is { } resId)
+                {
+                    WebView2Support.RespondResource(
+                        resWeb,
+                        resId,
+                        ValueParsers.AsString(args?["action"]) ?? "continue",
+                        ValueParsers.AsDouble(args?["status"]) is { } st ? (int)st : null,
+                        ValueParsers.AsString(args?["contentType"]),
+                        ValueParsers.AsString(args?["body"]));
+                }
+                return true;
+
             case "download_action":
                 if (element is WebView2 actionWeb
                     && ValueParsers.AsString(args?["downloadId"]) is { } actionId
@@ -185,7 +210,7 @@ internal static class ExtendedInvoke
         {
             if (web.CoreWebView2 is null)
             {
-                await web.EnsureCoreWebView2Async();
+                await WebView2Runtime.EnsureCore(web);
             }
 
             var json = await web.CoreWebView2!.ExecuteScriptAsync(script);

@@ -355,8 +355,16 @@ internal sealed class FormRenderer
         return true;
     }
 
-    /// <summary>标题栏高度（DIP），与系统标题栏一致。</summary>
-    private const int TitleBarHeight = WindowChrome.TitleBarHeight;
+    /// <summary>标题栏高度（DIP）。有返回按钮或输入框时加高，给部件留出空间。</summary>
+    private const int CompactTitleBarHeight = WindowChrome.TitleBarHeight;
+    private const int ExtendedTitleBarHeight = 46;
+
+    private int TitleBarHeight =>
+        (_returnButton || _textInputBox) ? ExtendedTitleBarHeight : CompactTitleBarHeight;
+
+    /// <summary>标题栏输入框的字号与高度。上下 padding 由这两个值算出。</summary>
+    private const double TitleInputFontSize = 12;
+    private const double TitleInputHeight = 32;
 
     /// <summary>窗口圆角半径（DIP）。</summary>
     /// <summary>自绘窗口圆角半径（父窗口、子窗口共用）。</summary>
@@ -513,13 +521,16 @@ internal sealed class FormRenderer
             _clipGeometry.CornerRadius = new Vector2(radius, radius);
         }
 
-        // 标题栏的上两角圆角也要跟着取消：窗口最大化后是直角铺满屏幕，
-        // 标题栏还留着圆角的话，角上会缺一块，露出底色。
+        // 标题栏的上两角圆角必须和内容容器用同一个半径：
+        // - 最大化：都为 0，直角铺满屏幕；
+        // - Win11 顶层：都为 0，圆角交给 DWM，自绘标题栏不能再画一层，
+        //   否则系统圆角和自绘圆角叠成双重轮廓；
+        // - Win10 / 子窗口：都用 8px 自绘圆角。
         if (_titleBarBorder is not null)
         {
             _titleBarBorder.CornerRadius = maximized
                 ? new CornerRadius(0)
-                : new CornerRadius(WindowCornerRadius, WindowCornerRadius, 0, 0);
+                : new CornerRadius(radius, radius, 0, 0);
         }
 
         // 最大化按钮的图标也在这里统一管。
@@ -607,7 +618,11 @@ internal sealed class FormRenderer
         var compositor = visual.Compositor;
 
         var geometry = compositor.CreateRoundedRectangleGeometry();
-        geometry.CornerRadius = new Vector2(WindowCornerRadius, WindowCornerRadius);
+
+        // 和内容容器、标题栏共用同一个半径。Win11 顶层窗口这里是 0：
+        // 圆角由 DWM 按整个窗口画，XAML 里再裁一次会变成双重轮廓。
+        var radius = CornerRadiusForWindow();
+        geometry.CornerRadius = new Vector2(radius, radius);
         geometry.Size = new Vector2(
             (float)Math.Max(1, target.ActualWidth),
             (float)Math.Max(1, target.ActualHeight));
@@ -635,11 +650,33 @@ internal sealed class FormRenderer
         var hoverRed = Windows.UI.Color.FromArgb(255, 0xC4, 0x2B, 0x1C);
         var pressedRed = Windows.UI.Color.FromArgb(255, 0xF1, 0x70, 0x7A);
 
-        // ---- 左侧：窗口图标 + 标题 ----
+        // ---- 左侧：返回按钮（可选） + 窗口图标 + 标题 + 输入框（可选） ----
         //
         // 图标从 Win32 窗口属性里读（WM_GETICON / 类默认图标），不是写死的
         // Segoe 字形——那样设了 icon= 也只在任务栏生效，标题栏一个样。
         // WindowIcon.LoadAsync 是异步的，先放占位字形，拿到图标再替换。
+
+        // 返回按钮在图标**左边**。和最大化按钮一样，点击不自己改窗口，
+        // 只发事件给 Python，由回调决定是返回上一页还是关窗。
+        var returnGlyph = new FontIcon
+        {
+            Glyph = "\uE72B",
+            FontSize = 12,
+            Foreground = new SolidColorBrush(glyphColor),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var returnBox = CreateBarButton(
+            returnGlyph, clearGray, hoverGray, pressedGray,
+            () => ReturnButtonPressed?.Invoke());
+        // 和右侧按钮同宽：返回按钮贴到标题栏最左边时，左右视觉重量对称。
+        returnBox.Width = 46;
+        // 右边留 8px，和图标到标题文字的间距一致——
+        // 不加的话按钮直接贴着图标，看着挤在一起。
+        returnBox.Margin = new Thickness(0, 0, 8, 0);
+        returnBox.DoubleTapped += (_, e) => e.Handled = true;
+        _returnBox = returnBox;
+
         var icon = new Microsoft.UI.Xaml.Controls.Image
         {
             Width = 16,
@@ -660,13 +697,106 @@ internal sealed class FormRenderer
             Foreground = new SolidColorBrush(glyphColor),
         };
 
-        var left = new StackPanel
+        // 标题右边的输入框：放大镜字形浮在 TextBox 左侧内边距里。
+        // 边框画在 Host 的 Border 上，TextBox 自己那圈边框去掉，
+        // 否则会叠成两条线、圆角也对不上。
+        var inputBorder = new Border
         {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
+            CornerRadius = new CornerRadius(4),
+            BorderThickness = new Thickness(1),
+            BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xE0, 0xE0, 0xE0)),
+            Background = new SolidColorBrush(ContentBackground()),
         };
+        // 文字实际占的是**行高**，不是字号：pt → px 约 ×1.334，
+        // 12 号字就是 16px。内容区按这个留，剩余高度平分给上下。
+        // 只按字号扣的话内容区不够高，文字会被裁/贴边。
+        const double ptToPx = 1.334;
+        var inputVPadding = Math.Max(
+            0, (TitleInputHeight - TitleInputFontSize * ptToPx) / 2.0);
+
+        var inputBox = new TextBox
+        {
+            FontSize = TitleInputFontSize,
+            Height = TitleInputHeight,
+            MinHeight = 0,
+            Margin = new Thickness(0),
+            // 左边 30px 留给放大镜图标；上下按字号算，别写死。
+            Padding = new Thickness(30, inputVPadding, 8, inputVPadding),
+            Background = null,
+            BorderThickness = new Thickness(0),
+
+            // 文字显式左对齐、垂直居中。
+            // TextBox 默认样式的对齐方式会让文字/光标落在它自己的内容区里，
+            // 和外面的 Border 差一截——表现就是「在框里点，光标却跑到别处」。
+            TextAlignment = TextAlignment.Left,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            VerticalContentAlignment = VerticalAlignment.Center,
+
+            // 填满 inputHost：边框、TextBox、放大镜三层占据同一格，
+            // 不能让 TextBox 自己居中，否则它的可点区域比边框窄一圈。
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+        };
+        var inputIcon = new FontIcon
+        {
+            Glyph = "\uE721",
+            FontSize = 12,
+            Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x8A, 0x8A, 0x8A)),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(9, 0, 0, 0),
+            IsHitTestVisible = false,
+        };
+
+        // 宽度不写死：放在 Star 列里，随标题栏剩下的空间伸缩。
+        // 高度固定 32，在 46 的加高标题栏里垂直居中。
+        var inputHost = new Grid
+        {
+            Height = TitleInputHeight,
+            MinWidth = 120,
+            Margin = new Thickness(12, 0, 12, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        inputHost.Children.Add(inputBorder);
+        inputHost.Children.Add(inputBox);
+        inputHost.Children.Add(inputIcon);
+
+        // 输入框里的点击/双击不能被标题栏抢去拖动或最大化
+        inputHost.PointerPressed += (_, e) => e.Handled = true;
+        inputHost.DoubleTapped += (_, e) => e.Handled = true;
+
+        inputBox.TextChanged += (_, _) => EmitTitleInput("textInputChanged");
+        inputBox.KeyDown += (_, e) =>
+        {
+            if (e.Key == Windows.System.VirtualKey.Enter)
+            {
+                e.Handled = true;
+                EmitTitleInput("textInputSubmitted");
+            }
+        };
+        _titleInputHost = inputHost;
+        _titleInput = inputBox;
+
+        // 左侧部件用 Grid 而不是 StackPanel：最后一列是 Star，
+        // 输入框才能吃掉标题文字与右侧按钮之间的剩余宽度。
+        var left = new Grid
+        {
+            VerticalAlignment = VerticalAlignment.Stretch,
+        };
+        left.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        left.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        left.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        left.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        Grid.SetColumn(returnBox, 0);
+        Grid.SetColumn(icon, 1);
+        Grid.SetColumn(_titleText, 2);
+        Grid.SetColumn(inputHost, 3);
+        left.Children.Add(returnBox);
         left.Children.Add(icon);
         left.Children.Add(_titleText);
+        left.Children.Add(inputHost);
 
         // ---- 右侧按钮 ----
         // 最小化图标随折叠状态切换：子窗口折叠后显示「还原」
@@ -682,6 +812,7 @@ internal sealed class FormRenderer
         var minimizeBox = CreateBarButton(
             minimizeGlyph, clearGray, hoverGray, pressedGray,
             () => MinimizeButtonPressed?.Invoke());
+        _minimizeBox = minimizeBox;
 
         var maximizeGlyph = new FontIcon
         {
@@ -723,6 +854,7 @@ internal sealed class FormRenderer
             Background = closeBackground,
             Child = closeGlyph,
         };
+        _closeBox = closeBox;
         closeBox.PointerEntered += (_, _) =>
         {
             FadeBrush(closeBackground, hoverRed);
@@ -754,7 +886,11 @@ internal sealed class FormRenderer
         buttons.Children.Add(maximizeBox);
         buttons.Children.Add(closeBox);
 
-        var inner = new Grid { Padding = new Thickness(12, 0, 0, 0) };
+        // 左边距不写死在这里：有返回按钮时它要贴到标题栏最左边（和右侧
+        // 按钮组一样），没返回按钮时图标才保留 12px 缩进。
+        // 具体由 ApplyTitleBarOptions 按 _returnButton 决定。
+        var inner = new Grid();
+        _titleBarInner = inner;
         inner.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         inner.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         Grid.SetColumn(left, 0);
@@ -825,11 +961,79 @@ internal sealed class FormRenderer
 
         _titleBarBorder = bar;
 
+        // 标题栏刚建好，把 render 之前收到的开关补上
+        ApplyTitleBarOptions();
+
         return bar;
     }
 
+    /// <summary>
+    /// 按 window spec 显隐标题栏上的返回按钮和输入框。
+    ///
+    /// 两者始终建好，只切 Visibility——这样 configure() 改属性时不必重建
+    /// 标题栏（重建会打断拖动状态和输入框里的文字）。
+    /// </summary>
+    private void ApplyTitleBarOptions()
+    {
+        var returnVisibility = _returnButton ? Visibility.Visible : Visibility.Collapsed;
+        if (_returnBox is not null && _returnBox.Visibility != returnVisibility)
+        {
+            _returnBox.Visibility = returnVisibility;
+        }
+
+        // 返回按钮要贴到标题栏最左边——和右侧按钮组一样从边缘起算。
+        // 没有返回按钮时，图标仍然保留原来的 12px 缩进。
+        if (_titleBarInner is not null)
+        {
+            _titleBarInner.Padding = new Thickness(_returnButton ? 0 : 12, 0, 0, 0);
+        }
+
+        var inputVisibility = _textInputBox ? Visibility.Visible : Visibility.Collapsed;
+        if (_titleInputHost is not null && _titleInputHost.Visibility != inputVisibility)
+        {
+            _titleInputHost.Visibility = inputVisibility;
+        }
+
+        // 任一扩展部件打开，标题栏从 32 加高到 46：
+        // 返回按钮和输入框都比 32 高，挤在默认高度里会顶到上下边缘。
+        // 按钮、标题栏本体一起改，否则按钮会浮在加高后的空白里。
+        var height = TitleBarHeight;
+        if (_titleBarBorder is not null)
+        {
+            _titleBarBorder.Height = height;
+        }
+
+        foreach (var box in new[] { _returnBox, _minimizeBox, _maximizeBox, _closeBox })
+        {
+            if (box is not null)
+            {
+                box.Height = height;
+            }
+        }
+
+        // 子窗口的拖动禁区按父窗口标题栏高度算，得跟着一起更新，
+        // 否则加高后子窗口还能被拖到标题栏的按钮上。
+        var hwnd = WindowNative.GetWindowHandle(_window);
+        if (hwnd != IntPtr.Zero)
+        {
+            EmbeddedWindow.SetTitleBarHeight(hwnd, height);
+        }
+    }
+
+    /// <summary>把标题栏输入框里的文本发回 Python。</summary>
+    private void EmitTitleInput(string name)
+    {
+        if (_rootId is null)
+        {
+            return;
+        }
+
+        var data = new JsonObject { ["text"] = _titleInput?.Text ?? "" };
+        _emit(_rootId, name, data, false);
+    }
+
     /// <summary>标题栏上的普通按钮（最小化 / 最大化同款）：透明底，悬停浅灰。</summary>
-    private static Border CreateBarButton(
+    private Border CreateBarButton(
         FontIcon glyph,
         Windows.UI.Color clear,
         Windows.UI.Color hover,
@@ -939,6 +1143,75 @@ internal sealed class FormRenderer
         animation.From = brush.Color;
         animation.To = to;
         animation.Duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
+        storyboard.Begin();
+    }
+
+    /// <summary>窗口关闭前的淡出时长。</summary>
+    private const int CloseFadeMilliseconds = 100;
+
+    /// <summary>关闭时窗口缩小到的比例。</summary>
+    private const double CloseFadeScale = 0.9;
+
+    /// <summary>
+    /// 让整扇窗口的 XAML 内容一边缩小一边淡出，结束后回调。
+    ///
+    /// 动画的是外壳根容器的 RenderTransform 和 Opacity——不是改窗口透明度，
+    /// 也不是 ShowWindow：内容先缩到 90% 并淡到全透明，100ms 后再真正 Close，
+    /// 用户看到的是平滑消失而不是一瞬间没了。
+    /// </summary>
+    public void FadeOut(Action onDone)
+    {
+        var root = _outerFrame;
+        if (root is null)
+        {
+            onDone();
+            return;
+        }
+
+        // 缩放以窗口中心为锚点；从当前值起动画，避免已有变换时跳一下。
+        root.RenderTransformOrigin = new Windows.Foundation.Point(0.5, 0.5);
+        var scale = root.RenderTransform as ScaleTransform;
+        if (scale is null)
+        {
+            scale = new ScaleTransform();
+            root.RenderTransform = scale;
+        }
+
+        // 用 XAML Storyboard（Opacity + ScaleX + ScaleY），和 FadeBrush 同一套路子：
+        // Composition 的 CreateScalarAnimation 在这版 WinAppSDK 元数据里不可用。
+        var duration = new Duration(TimeSpan.FromMilliseconds(CloseFadeMilliseconds));
+        var opacity = new DoubleAnimation
+        {
+            From = root.Opacity,
+            To = 0,
+            Duration = duration,
+            EnableDependentAnimation = true,
+        };
+        Storyboard.SetTarget(opacity, root);
+        Storyboard.SetTargetProperty(opacity, nameof(root.Opacity));
+
+        var scaleX = new DoubleAnimation
+        {
+            From = scale.ScaleX,
+            To = CloseFadeScale,
+            Duration = duration,
+            EnableDependentAnimation = true,
+        };
+        Storyboard.SetTarget(scaleX, scale);
+        Storyboard.SetTargetProperty(scaleX, nameof(scale.ScaleX));
+
+        var scaleY = new DoubleAnimation
+        {
+            From = scale.ScaleY,
+            To = CloseFadeScale,
+            Duration = duration,
+            EnableDependentAnimation = true,
+        };
+        Storyboard.SetTarget(scaleY, scale);
+        Storyboard.SetTargetProperty(scaleY, nameof(scale.ScaleY));
+
+        var storyboard = new Storyboard { Children = { opacity, scaleX, scaleY } };
+        storyboard.Completed += (_, _) => onDone();
         storyboard.Begin();
     }
 
@@ -1463,6 +1736,9 @@ internal sealed class FormRenderer
     /// <summary>标题栏的最大化 / 还原按钮，双击标题栏也走这里。</summary>
     public Action? MaximizeButtonPressed { get; set; }
 
+    /// <summary>标题栏应用图标左边的返回按钮，点了发 returnRequested 给 Python。</summary>
+    public Action? ReturnButtonPressed { get; set; }
+
     /// <summary>
     /// 嵌入子窗口当前是否折叠。标题栏的最小化按钮图标据此切换：
     /// 折叠后变成「还原」，展开时是「最小化」。
@@ -1501,6 +1777,30 @@ internal sealed class FormRenderer
 
     /// <summary>标题栏上的最大化按钮（可能要禁用）。</summary>
     private Border? _maximizeBox;
+
+    /// <summary>标题栏上的最小化按钮。</summary>
+    private Border? _minimizeBox;
+
+    /// <summary>标题栏上的关闭按钮。</summary>
+    private Border? _closeBox;
+
+    /// <summary>应用图标左边的返回按钮。</summary>
+    private Border? _returnBox;
+
+    /// <summary>标题栏里装左侧部件与右侧按钮的网格：左边距随返回按钮显隐变化。</summary>
+    private Grid? _titleBarInner;
+
+    /// <summary>标题右边的带图标输入框（整个格子，控制显隐）。</summary>
+    private Grid? _titleInputHost;
+
+    /// <summary>标题栏输入框本体，供运行期读写文本。</summary>
+    private TextBox? _titleInput;
+
+    /// <summary>标题栏是否显示返回按钮。</summary>
+    private bool _returnButton;
+
+    /// <summary>标题栏是否显示输入框。</summary>
+    private bool _textInputBox;
 
     /// <summary>
     /// 最大化是否交给 Python 回调处理。
@@ -1545,6 +1845,10 @@ internal sealed class FormRenderer
             Icon = ValueParsers.AsString(props["icon"]),
             AlwaysOnTop = ValueParsers.AsBool(props["alwaysOnTop"]),
             MaximizeRequestable = ValueParsers.AsBool(props["maximizeRequestable"]),
+            ReturnButton = ValueParsers.AsBool(props["returnButton"])
+                ?? ValueParsers.AsBool(props["RetrunButtom"]),
+            TextInputBox = ValueParsers.AsBool(props["textInputBox"])
+                ?? ValueParsers.AsBool(props["TextInputBox"]),
             Minimizable = ValueParsers.AsBool(props["minimizable"]),
             Maximizable = ValueParsers.AsBool(props["maximizable"]),
             Maximized = ValueParsers.AsBool(props["maximized"]),
@@ -1575,6 +1879,20 @@ internal sealed class FormRenderer
             {
                 SetMaximizeRequestable(requestable);
             }
+
+            // 标题栏上的可选部件：返回按钮 / 带图标输入框。
+            // 首次 render 时标题栏还没建，这里先把状态存下来，EnsureShell 会补上。
+            if (spec.ReturnButton is { } returnButton)
+            {
+                _returnButton = returnButton;
+            }
+
+            if (spec.TextInputBox is { } textInputBox)
+            {
+                _textInputBox = textInputBox;
+            }
+
+            ApplyTitleBarOptions();
 
             if (Embedded)
             {

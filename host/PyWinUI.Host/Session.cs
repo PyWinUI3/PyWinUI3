@@ -40,6 +40,9 @@ internal sealed class WindowContext
     public bool FirstRenderNotified;
     public bool Closed;
 
+    /// <summary>正在淡出、即将关闭。挡住淡出期间的重复 close 请求。</summary>
+    public bool Closing;
+
     /// <summary>
     /// 非 null 表示这扇窗是另一个会话的 WS_CHILD 子窗口。
     /// 父窗口关闭时按这个字段找出来一并关掉。
@@ -132,6 +135,7 @@ internal sealed class Session
         context.Renderer.CloseButtonPressed = () => RequestClose(context);
         context.Renderer.MinimizeButtonPressed = () => MinimizeOrCollapse(context);
         context.Renderer.MaximizeButtonPressed = () => ToggleMaximize(context);
+        context.Renderer.ReturnButtonPressed = () => RequestReturn(context);
 
         return context;
     }
@@ -280,15 +284,7 @@ internal sealed class Session
                     break;
 
                 case "close":
-                    if (ReferenceEquals(context, _main))
-                    {
-                        Shutdown(0);
-                    }
-                    else
-                    {
-                        CloseSessionWindow(context, 0);
-                    }
-
+                    BeginClose(context);
                     break;
 
                 default:
@@ -331,8 +327,8 @@ internal sealed class Session
 
         if (string.IsNullOrEmpty(context.RootId))
         {
-            // 还没 render 过（连根节点都没有），没什么可问的，直接关
-            CloseSessionWindow(context, 0);
+            // 还没 render 过（连根节点都没有），没什么可问的，直接淡出关掉
+            BeginClose(context);
             return;
         }
 
@@ -402,6 +398,62 @@ internal sealed class Session
             data,
             echo: false,
             session: context.SessionId));
+    }
+
+    /// <summary>
+    /// 标题栏的返回按钮：宿主不动窗口，只把 returnRequested 发回去。
+    /// 是切页、返回上一级还是关窗，全由 Python 回调决定。
+    /// </summary>
+    private void RequestReturn(WindowContext context)
+    {
+        if (context.Closed || string.IsNullOrEmpty(context.RootId))
+        {
+            return;
+        }
+
+        Send(Outbound.Event(
+            context.RootId!,
+            "returnRequested",
+            context.Rev,
+            null,
+            echo: false,
+            session: context.SessionId));
+    }
+
+    /// <summary>
+    /// 统一的关闭入口：先让 XAML 内容淡出 100ms，再真正销毁。
+    ///
+    /// 所有关窗请求都走这里——Python 的 close()、标题栏关闭按钮（经
+    /// closeRequested 回到 Python 再调 close()）。淡出期间窗口仍可交互，
+    /// 但 _closing 标志挡住重复请求。
+    /// </summary>
+    private void BeginClose(WindowContext context)
+    {
+        if (context.Closed || context.Closing)
+        {
+            return;
+        }
+
+        context.Closing = true;
+
+        void Finish()
+        {
+            // 淡出到全透明后先把窗口从屏幕上摘掉，再走销毁。
+            // 不 HIDE 的话，动画结束到 Close 之间会闪一下原始内容
+            // （Opacity 动画停在 0，但布局/合成重算可能把根容器又画出来）。
+            ShowWindowNative(context.Window, 0);  // SW_HIDE
+
+            if (ReferenceEquals(context, _main))
+            {
+                Shutdown(0);
+            }
+            else
+            {
+                CloseSessionWindow(context, 0);
+            }
+        }
+
+        context.Renderer.FadeOut(Finish);
     }
 
     /// <summary>关闭一个非 main 会话窗口：回通知、清状态，宿主继续。</summary>
@@ -970,7 +1022,7 @@ internal sealed class Session
         {
             if (web.CoreWebView2 is null)
             {
-                await web.EnsureCoreWebView2Async();
+                await WebView2Runtime.EnsureCore(web);
             }
 
             web.NavigateToString(html);

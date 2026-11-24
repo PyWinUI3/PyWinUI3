@@ -20,7 +20,8 @@ class TestVersionConsistency(unittest.TestCase):
         m = re.search(r'^version = "([^"]+)"', self.pyproject, re.M)
         self.assertIsNotNone(m)
         self.version = m.group(1)
-        self.assertTrue(re.fullmatch(r"\d+\.\d+\.\d+", self.version))
+        # 允许 PEP 440 的预发布后缀（rc1/rc2 等）
+        self.assertTrue(re.fullmatch(r"\d+\.\d+\.\d+(?:rc\d+)?", self.version))
 
     def test_all_versions_match(self) -> None:
         m = re.search(r'^version = "([^"]+)"', self.pyproject, re.M)
@@ -38,7 +39,7 @@ class TestVersionConsistency(unittest.TestCase):
 
     def test_no_stale_version_in_readme(self) -> None:
         # README 里不应再出现与当前版本不同的 pywinui3-<ver> wheel 名
-        found = set(re.findall(r"pywinui3-(\d+\.\d+\.\d+)-py3-none", self.readme))
+        found = set(re.findall(r"pywinui3-(\d+\.\d+\.\d+(?:rc\d+)?)-py3-none", self.readme))
         m = re.search(r'^version = "([^"]+)"', self.pyproject, re.M)
         assert m is not None
         self.assertEqual(found, {m.group(1)})

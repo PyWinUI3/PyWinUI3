@@ -367,6 +367,9 @@ public static class Inbound
         spec.Minimizable = TryBool(e, "minimizable");
         spec.Maximizable = TryBool(e, "maximizable");
         spec.Maximized = TryBool(e, "maximized");
+        // 「RetrunButtom」是早期示例里写错的拼写，收下以免静默失效
+        spec.ReturnButton = TryBool(e, "returnButton") ?? TryBool(e, "RetrunButtom");
+        spec.TextInputBox = TryBool(e, "textInputBox") ?? TryBool(e, "TextInputBox");
         spec.Scroll = TryBool(e, "scroll");
         spec.Theme = TryString(e, "theme");
         spec.Backdrop = TryString(e, "backdrop");
