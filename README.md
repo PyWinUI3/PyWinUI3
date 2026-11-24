@@ -62,8 +62,14 @@ pip install https://github.com/PyWinUI3/PyWinUI3/releases/download/v1.0.0rc2/pyw
 
 这是当前已发布的版本；发布新版本后把两处版本号一起换成新标签。包**没有发布到 PyPI**，只能从这里装。
 
-wheel 的平台标签是 `win_amd64`，在 Linux / macOS 上 pip 会直接拒绝安装——
-而不是装成功之后一启动才崩。
+ARM64 设备（如 Surface、骁龙 Windows 笔记本）把上面的 `win_amd64` 换成
+`win_arm64` 即可。两个架构的 wheel 都由 CI 在推送 `v*` 标签时自动构建并发布
+到对应的 Release（见下方「自动构建 wheel」）。
+
+wheel 的平台标签是 `win_amd64` / `win_arm64`，在 Linux / macOS 或非对应架构的
+Windows 上 pip 会直接拒绝安装——而不是装成功之后一启动才崩。每个 wheel 在
+CI 里都会经 `tools/verify_wheel.py` 校验内部宿主 exe 的 PE 架构与标签一致，
+杜绝「贴着 arm64 标签却装了 x64 二进制」这类启动才炸的问题。
 
 **从源码构建**：顺序是**先构建宿主，再装 Python 包**。`tools/build_host.ps1` 执行
 `dotnet build -c Release`，把产物复制进 `python/pywinui3/runtime/PyWinUI.Host/`；
@@ -1135,9 +1141,19 @@ python tests/smoke_badline.py    # 坏 JSON / 错误字段之后会话仍可用
 python tests/smoke_webview2.py   # 真机：消息 / 新窗口回执 / 下载生命周期
 ```
 
-CI（`.github/workflows/ci.yml`）跑 Python 单测、宿主 `dotnet build -c Release` 与 C# 协议层
-`dotnet test`。协议层测试项目是纯 net8.0，直接链接宿主的 `Protocol/*.cs`，不需要桌面会话，
-也不需要拉起整套 WinUI 运行时。
+CI（`.github/workflows/ci.yml`）跑 Python 单测、宿主 `dotnet build -c Release`、C# 协议层
+`dotnet test`，以及三个不需要人工交互的端到端 smoke。协议层测试项目是纯 net8.0，直接链接
+宿主的 `Protocol/*.cs`，不需要桌面会话，也不需要拉起整套 WinUI 运行时。
+
+**自动构建 wheel**（`.github/workflows/build-wheels.yml`）：推 `main`/`master`/`snapshot`
+或开 PR 时，用矩阵并行构建 `win_amd64` 和 `win_arm64` 两个 wheel，各自跑
+`tools/verify_wheel.py` 校验 exe 架构后上传为 CI artifact（可在 Actions 页面下载试用）。
+推 `v*` 标签时额外把两个 wheel 发布到同名 GitHub Release，即安装章节里那条直链。
+本地手动发布一个版本：
+
+```powershell
+git tag v1.0.0rc2; git push origin v1.0.0rc2   # CI 自动构建两个架构并发布 Release
+```
 
 > **不要删 `App.xaml`。** 它看起来只是放资源，实际上 XAML 编译器靠它生成
 > `IXamlMetadataProvider` 与 `XamlTypeInfo`。少了它，`XamlControlsResources` 在构造时会抛

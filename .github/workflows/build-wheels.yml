@@ -1,0 +1,100 @@
+name: Build Wheels
+
+# 自动为 x64 / ARM64 打出可安装的 wheel。
+#
+# 触发策略：
+#   - 推 main/master/snapshot 或开 PR：两个架构都构建并上传 artifact，
+#     用来提前发现「ARM64 编译不过」「标签与 exe 架构不符」这类回归。
+#   - 推 v* tag：在上面基础上，把两个 wheel 发布到同名 GitHub Release，
+#     README 里那条 releases/download/vX/pywinui3-...-win_amd64.whl 就能用。
+#   - 手动触发：同普通 push，仅构建 + artifact。
+on:
+  push:
+    branches: [main, master, snapshot]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # 只有发布步骤需要，构建 job 用不到写权限
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 构建 wheel (${{ matrix.wheel_tag }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false # 一个架构失败不要cancel另一个，方便对比日志
+      matrix:
+        include:
+          - platform: x64
+            wheel_tag: win_amd64
+          - platform: ARM64
+            wheel_tag: win_arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装打包依赖
+        run: python -m pip install --upgrade pip build
+
+      # build_wheel.ps1 内部：dotnet publish(-r win-x64/win-arm64) →
+      # 把产物复制进 python/pywinui3/runtime/ → python -m build --wheel →
+      # retag_wheel.py 把 py3-none-any 改成 win_amd64/win_arm64。
+      - name: 构建 ${{ matrix.platform }} wheel
+        shell: pwsh
+        run: ./tools/build_wheel.ps1 -Platform ${{ matrix.platform }}
+
+      # 标签是手写的，必须校验内部 exe 真是对应架构，防止「贴 arm64 标签
+      # 装的却是 x64 exe」这种启动才炸的错误。
+      - name: 校验 wheel 标签与 exe 架构
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem "dist\pywinui3-*-${{ matrix.wheel_tag }}.whl" |
+                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $wheel) { throw "找不到 ${{ matrix.wheel_tag }} wheel" }
+          python tools/verify_wheel.py $wheel.FullName --platform ${{ matrix.wheel_tag }}
+          if ($LASTEXITCODE -ne 0) { throw "wheel 校验失败" }
+
+      - name: 上传 wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.wheel_tag }}
+          path: dist/pywinui3-*-${{ matrix.wheel_tag }}.whl
+          if-no-files-found: error
+
+  release:
+    name: 发布到 GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载两个架构的 wheel
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 列出待发布文件
+        run: ls -lh dist/*.whl
+
+      # tag 推送时 Release 可能还不存在：先建（带自动发行说明），
+      # 再上传两个 wheel。--clobber 让重推同名 tag 时覆盖旧资产。
+      - name: 创建/更新 Release 并上传 wheel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" dist/*.whl --clobber
