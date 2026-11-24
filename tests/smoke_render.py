@@ -22,6 +22,14 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
+# Windows runner 的控制台默认编码是 cp1252，check() 里的中文标签会直接
+# UnicodeEncodeError 把冒烟脚本打断（Linux/macOS 是 UTF-8 所以本地不暴露）。
+# 强制把 stdout/stderr 换成 UTF-8，保证冒烟在 CI 的 windows-latest 上能跑完。
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
+    sys.stderr.reconfigure(encoding="utf-8")
+
 HOST_EXE = "PyWinUI.Host.exe"
 PROTOCOL_VERSION = 1
 

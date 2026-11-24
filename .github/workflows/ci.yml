@@ -53,17 +53,22 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Windows runner 的 stdout 默认 cp1252，冒烟脚本里的中文标签会抛
+      # UnicodeEncodeError；脚本内已 reconfigure，这里再兜一层环境变量。
       - name: 冒烟 —— 基础渲染
         run: python tests/smoke_render.py --hold 0
         env:
           PYTHONPATH: python
+          PYTHONIOENCODING: utf-8
 
       - name: 冒烟 —— 坏输入容错
         run: python tests/smoke_badline.py
         env:
           PYTHONPATH: python
+          PYTHONIOENCODING: utf-8
 
       - name: 冒烟 —— 会话隔离与 render 失败回执
         run: python tests/smoke_sessions.py
         env:
           PYTHONPATH: python
+          PYTHONIOENCODING: utf-8

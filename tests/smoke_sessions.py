@@ -12,6 +12,11 @@ import sys
 import time
 from pathlib import Path
 
+# 见 smoke_render.py 同处说明：Windows runner 默认 cp1252，中文标签会抛
+# UnicodeEncodeError。独立运行本脚本时也要保证 UTF-8 输出。
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from smoke_render import Host, default_exe  # noqa: E402
