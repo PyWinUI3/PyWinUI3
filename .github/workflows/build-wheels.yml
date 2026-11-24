@@ -94,13 +94,24 @@ jobs:
       - name: 列出待发布文件
         run: ls -lh dist/*.whl
 
-      # tag 推送时 Release 可能还不存在：先建（带自动发行说明），
-      # 再上传两个 wheel。--clobber 让重推同名 tag 时覆盖旧资产。
+      # tag 推送时 Release 可能还不存在：先建（带自动 changelog），
+      # 再在描述前统一加一行「本版本由 CI/CD 自动构建」，随后接回自动
+      # 生成的正常说明。用前缀判断保证幂等，重推同名 tag 不会重复叠加。
+      # 最后上传两个 wheel；--clobber 覆盖旧资产。
       - name: 创建/更新 Release 并上传 wheel
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --title "$TAG" --generate-notes
+          PREFIX="本版本由 CI/CD 自动构建。"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
+          body="$(gh release view "$TAG" --json body -q .body)"
+          case "$body" in
+            "$PREFIX"*) ;;  # 已有前缀，不重复添加
+            *) gh release edit "$TAG" --notes "$PREFIX
+
+$body" ;;
+          esac
           gh release upload "$TAG" dist/*.whl --clobber
