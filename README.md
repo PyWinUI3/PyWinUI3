@@ -11,7 +11,7 @@ JSON Lines。`mainloop()` 的语义与 tkinter 一致；宿主崩溃不会带走
 | **Python** | 3.10+，仅标准库，零第三方依赖 |
 | **协议** | [docs/protocol.md](docs/protocol.md) 是唯一权威定义 |
 | **能力** | 多窗口与 WS_CHILD 嵌入子窗口、无边框透明圆角窗口、系统托盘、Win2D 画布、D3D11 三维视口、query/result 同步读回、micro 微代码、键盘/焦点/拖放/窗口状态事件 |
-| **版本 / 许可** | 0.2.5 · GPL-3.0-only |
+| **版本 / 许可** | 1.0.0-rc1 · GPL-3.0-only |
 
 ```python
 import pywinui3 as ui
@@ -57,7 +57,7 @@ win.mainloop()
 **从 release 安装**（推荐；仅 Windows，需要 Python 3.10+）：
 
 ```powershell
-pip install https://github.com/SystenGames/PyWinUI3/releases/download/v0.2.5/pywinui3-0.2.5-py3-none-win_amd64.whl
+pip install https://github.com/SystenGames/PyWinUI3/releases/download/v1.0.0-rc1/pywinui3-1.0.0rc1-py3-none-win_amd64.whl
 ```
 
 这是当前已发布的版本；发布新版本后把两处版本号一起换成新标签。包**没有发布到 PyPI**，只能从这里装。

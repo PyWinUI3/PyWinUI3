@@ -14,7 +14,7 @@ public sealed class WireTests
     public void Ready_UsesStableProtocolIdentity()
     {
         Assert.Equal(1, Wire.Version);
-        Assert.Equal("PyWinUI.Host/0.2.5", Wire.HostId);
+        Assert.Equal("PyWinUI.Host/1.0.0-rc1", Wire.HostId);
         Assert.True(Wire.MaxLineBytes > 0);
     }
 

@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 # "仅 Windows" 只是提示，pip 不会据此拒绝安装。真正让非 Windows 装不上的是标签。
 [project]
 name = "pywinui3"
-version = "0.2.5"
+version = "1.0.0rc1"
 description = "Tkinter-style Python UI library backed by a real WinUI 3 renderer"
 readme = { text = "用 tkinter 的写法，渲染真正的 WinUI 3 界面。详见仓库根目录 README.md。", content-type = "text/markdown" }
 requires-python = ">=3.10"
