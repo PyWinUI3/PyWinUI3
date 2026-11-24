@@ -29,9 +29,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/SystenGames/PyWinUI3"
-Source = "https://github.com/SystenGames/PyWinUI3"
-Issues = "https://github.com/SystenGames/PyWinUI3/issues"
+Homepage = "https://github.com/PyWinUI3/PyWinUI3"
+Source = "https://github.com/PyWinUI3/PyWinUI3"
+Issues = "https://github.com/PyWinUI3/PyWinUI3/issues"
 
 [tool.setuptools]
 # 让 MANIFEST.in 生效：host 产物不是 .py，必须显式声明才会进 wheel
