@@ -110,8 +110,6 @@ jobs:
           body="$(gh release view "$TAG" --json body -q .body)"
           case "$body" in
             "$PREFIX"*) ;;  # 已有前缀，不重复添加
-            *) gh release edit "$TAG" --notes "$PREFIX
-
-$body" ;;
+            *) gh release edit "$TAG" --notes "$(printf '%s\n\n%s' "$PREFIX" "$body")" ;;
           esac
           gh release upload "$TAG" dist/*.whl --clobber
