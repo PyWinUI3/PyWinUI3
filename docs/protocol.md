@@ -94,7 +94,7 @@ Python                          Host
 #### `hello` — 握手
 
 ```json
-{ "op": "hello", "protocol": 1, "client": "pywinui3/1.0.0rc2", "pid": 12345 }
+{ "op": "hello", "protocol": 1, "client": "pywinui3/1.0.0rc3", "pid": 12345 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -378,7 +378,7 @@ picker（标题被忽略）。用户取消时回 `ok=false`，`paths` 为空。
 {
   "t": "ready",
   "protocol": 1,
-  "host": "PyWinUI.Host/1.0.0rc2",
+  "host": "PyWinUI.Host/1.0.0rc3",
   "os": { "version": "10.0.19044", "build": 19044 },
   "capabilities": {
     "mica": false,
@@ -1393,8 +1393,8 @@ win.mainloop()
 对应线上流量：
 
 ```
-→ {"op":"hello","protocol":1,"client":"pywinui3/1.0.0rc2","pid":8123}
-← {"t":"ready","protocol":1,"host":"PyWinUI.Host/1.0.0rc2","os":{"version":"10.0.19044","build":19044},"capabilities":{"mica":false,"acrylic":true,"roundedCorners":false,"backdrop":"acrylic"}}
+→ {"op":"hello","protocol":1,"client":"pywinui3/1.0.0rc3","pid":8123}
+← {"t":"ready","protocol":1,"host":"PyWinUI.Host/1.0.0rc3","os":{"version":"10.0.19044","build":19044},"capabilities":{"mica":false,"acrylic":true,"roundedCorners":false,"backdrop":"acrylic"}}
 → {"op":"render","rev":1,"window":{"title":"Demo","width":640,"height":480,"backdrop":"auto"},"root":"n0","nodes":[{"id":"n0","type":"Column","props":{"padding":24,"spacing":12},"children":["n1","n2"]},{"id":"n1","type":"Label","props":{"text":"你好","fontSize":28}},{"id":"n2","type":"Button","props":{"text":"点我"},"events":{"click":"h1"}}]}
 ← {"t":"ack","rev":1}
 ← {"t":"event","id":"n2","event":"click","rev":1,"data":{}}
