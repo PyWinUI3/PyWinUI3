@@ -171,6 +171,17 @@ internal static class ExtendedInvoke
                 }
                 return true;
 
+            case "respond_certificate_error":
+                if (element is WebView2 certWeb
+                    && ValueParsers.AsString(args?["requestId"]) is { } certId)
+                {
+                    WebView2Support.RespondCertificateError(
+                        certWeb,
+                        certId,
+                        ValueParsers.AsBool(args?["allow"]) ?? false);
+                }
+                return true;
+
             case "respond_resource":
                 if (element is WebView2 resWeb
                     && ValueParsers.AsString(args?["requestId"]) is { } resId)

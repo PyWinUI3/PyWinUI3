@@ -482,11 +482,25 @@ class App:
         只合并连续的、同 id 的 set/window；insert / remove / move 会清空
         合并索引——否则「remove n1 → 重建一个也叫 n1 的节点 → set」会被
         错误地并到被删掉的那个 set 上。
+
+        ``_session`` 是每个 patch 的内部归属键：set/insert/remove/move 从
+        节点注册表查，window op 没有节点 id，由 :class:`Window` 显式带上。
+        :meth:`_flush_patches` 按它分组，把补丁发到各自的会话。新建合并 op
+        时必须保留这个键，否则该 op 会在 flush 时退化成 main。
         """
         for op in ops:
             # 内部键：宿主解析 PatchOp 时忽略未知字段，flush 时用它分组
             target_id = op.get("id") or op.get("parent")
-            session = self._session_of_node.get(str(target_id), "main") if target_id else "main"
+            # 显式带的 _session 优先（window op 无节点 id，只能显式带）；
+            # 用 "in" 而非 or，避免显式的 "main" 被节点查询覆盖。
+            if "_session" in op:
+                session = op["_session"]
+            else:
+                session = (
+                    self._session_of_node.get(str(target_id), "main")
+                    if target_id
+                    else "main"
+                )
             op = {**op, "_session": session}
 
             kind = op.get("t")
@@ -503,6 +517,8 @@ class App:
                     "t": "set",
                     "id": op.get("id"),
                     "props": dict(op.get("props") or {}),
+                    # 新建的合并 op 必须带上会话，否则 flush 时归到 main
+                    "_session": session,
                 }
                 if "events" in op:
                     merged["events"] = op["events"]
@@ -511,12 +527,19 @@ class App:
                 continue
 
             if kind == "window":
-                index = self._pending_index.get("window")
+                # 合并键按会话隔离：两个窗口同一帧改标题不能并成一条，
+                # 否则子窗口的属性会打到主窗口（旧实现全局共用一个键）。
+                key = "window:" + session
+                index = self._pending_index.get(key)
                 if index is not None and self._pending[index].get("t") == "window":
                     self._pending[index].setdefault("props", {}).update(op.get("props") or {})
                     continue
-                self._pending_index["window"] = len(self._pending)
-                self._pending.append({"t": "window", "props": dict(op.get("props") or {})})
+                self._pending_index[key] = len(self._pending)
+                self._pending.append({
+                    "t": "window",
+                    "props": dict(op.get("props") or {}),
+                    "_session": session,
+                })
                 continue
 
             # 结构类操作保持独立、保持顺序

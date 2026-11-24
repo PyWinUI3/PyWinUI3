@@ -323,6 +323,11 @@ internal sealed class EventBridge
             case "downloadStarting":
             case "downloadProgress":
             case "downloadStateChanged":
+            case "permissionRequested":
+            case "webResourceRequested":
+            case "certificateError":
+                // 必须在这里登记订阅：WebView2Support 的 Emit 只往「已订阅」的
+                // 事件名推数据。少登记一个，对应能力（含证书错误告警）就静默失效。
                 if (element is WebView2 coreEventWeb)
                 {
                     WebView2Support.Subscribe(coreEventWeb, eventName);

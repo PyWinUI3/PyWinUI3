@@ -44,3 +44,26 @@ jobs:
       # 覆盖 JSON 口径、错误分级、NaN 清洗、坏行不致命等回归点。
       - name: C# 协议层单测
         run: dotnet test host/PyWinUI.Host.Tests/PyWinUI.Host.Tests.csproj -c Release --nologo
+
+      # 端到端冒烟：windows-latest 自带交互式桌面会话，dotnet build 的产物
+      # 就在 bin 下，smoke_render.default_exe() 能直接找到。这些脚本用真实
+      # 宿主进程对话，覆盖协议层单测测不到的渲染落地与会话隔离（曾经 CI
+      # 完全不跑 smoke，串台/ack 回归全靠人工）。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 冒烟 —— 基础渲染
+        run: python tests/smoke_render.py --hold 0
+        env:
+          PYTHONPATH: python
+
+      - name: 冒烟 —— 坏输入容错
+        run: python tests/smoke_badline.py
+        env:
+          PYTHONPATH: python
+
+      - name: 冒烟 —— 会话隔离与 render 失败回执
+        run: python tests/smoke_sessions.py
+        env:
+          PYTHONPATH: python

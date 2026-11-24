@@ -618,20 +618,26 @@ internal sealed class Session
                 context.RootId = render.Root;
                 // 窗口能力（最大化/最小化）由 ApplyWindowSpec 在成功落地窗口属性时一并交还，
                 // 渲染失败时窗口保持加载态的小尺寸——那里能最大化毫无意义。
-                context.Renderer.Render(render);
-                Send(Outbound.Ack(render.Rev));
 
-                if (!context.FirstRenderNotified)
+                // Render() 失败时已经把加载圈换成错误页，并通过 _error 回报了原因。
+                // 此时绝不能回 ack：ack 的含义是「这一帧成功落地」，回它会让
+                // 上游误判渲染成功（错误页被当成正常界面）。只有成功才回执。
+                if (context.Renderer.Render(render))
                 {
-                    context.FirstRenderNotified = true;
+                    Send(Outbound.Ack(render.Rev));
 
-                    // 首帧落地了，强制发一次「原地移动」通知，让框架把
-                    // 最大化图标、圆角、拖动基准这些状态重新算一遍。
-                    CustomChrome.NotifyMove(context.Window);
-
-                    if (ReferenceEquals(context, _main))
+                    if (!context.FirstRenderNotified)
                     {
-                        FirstRenderApplied?.Invoke();
+                        context.FirstRenderNotified = true;
+
+                        // 首帧落地了，强制发一次「原地移动」通知，让框架把
+                        // 最大化图标、圆角、拖动基准这些状态重新算一遍。
+                        CustomChrome.NotifyMove(context.Window);
+
+                        if (ReferenceEquals(context, _main))
+                        {
+                            FirstRenderApplied?.Invoke();
+                        }
                     }
                 }
 

@@ -366,6 +366,10 @@ public static class Inbound
         spec.AlwaysOnTop = TryBool(e, "alwaysOnTop");
         spec.Minimizable = TryBool(e, "minimizable");
         spec.Maximizable = TryBool(e, "maximizable");
+        // 标题栏最大化按钮的启用开关。漏解析会让 on_maximize_request()
+        // 设置的 true 在首帧就丢失——mainloop 前调用时只有 render 这一条路，
+        // 按钮于是永远灰着。
+        spec.MaximizeRequestable = TryBool(e, "maximizeRequestable");
         spec.Maximized = TryBool(e, "maximized");
         // 「RetrunButtom」是早期示例里写错的拼写，收下以免静默失效
         spec.ReturnButton = TryBool(e, "returnButton") ?? TryBool(e, "RetrunButtom");

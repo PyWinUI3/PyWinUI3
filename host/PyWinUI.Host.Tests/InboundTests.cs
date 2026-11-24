@@ -65,6 +65,42 @@ public sealed class InboundTests
     }
 
     [Fact]
+    public void Parse_Render_KeepsMaximizeRequestable()
+    {
+        // 回归：ParseWindow 曾漏掉这个字段，导致 on_maximize_request() 在
+        // mainloop 前挂好回调后，首帧 render 里 true 被丢弃，按钮永远灰着。
+        var msg = Assert.IsType<RenderMessage>(Inbound.Parse("""
+            {
+              "op": "render", "rev": 1, "root": "root",
+              "window": {
+                "title": "T", "maximizeRequestable": true,
+                "returnButton": false, "textInputBox": false
+              },
+              "nodes": [ { "id": "root", "type": "Column" } ]
+            }
+            """));
+
+        Assert.True(msg.Window.MaximizeRequestable);
+        Assert.False(msg.Window.ReturnButton);
+        Assert.False(msg.Window.TextInputBox);
+    }
+
+    [Fact]
+    public void Parse_Render_MaximizeRequestableDefaultsNullWhenAbsent()
+    {
+        // 缺省保持 null：由 Rendering 层决定默认值，协议层不预设。
+        var msg = Assert.IsType<RenderMessage>(Inbound.Parse("""
+            {
+              "op": "render", "rev": 1, "root": "root",
+              "window": { "title": "T" },
+              "nodes": [ { "id": "root", "type": "Column" } ]
+            }
+            """));
+
+        Assert.Null(msg.Window.MaximizeRequestable);
+    }
+
+    [Fact]
     public void Parse_Patch_AllFiveOps()
     {
         var msg = Assert.IsType<PatchMessage>(Inbound.Parse("""

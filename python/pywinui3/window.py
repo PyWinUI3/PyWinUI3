@@ -238,7 +238,9 @@ class Window(Widget):
             merged = {**self._window_props, **window_props}
             self._check_title_bar_handlers(merged)
             self._window_props.update(window_props)
-            self._app._send_patch([protocol.op_window(window_props)])
+            self._app._send_patch(
+                [protocol.op_window(window_props, session=self._session)]
+            )
 
         if node_props:
             self._props.update(node_props)
@@ -339,7 +341,9 @@ class Window(Widget):
 
         if self._app is not None and self._app._host is not None:
             self._app._send_patch(
-                [protocol.op_window({"maximizeRequestable": requestable})]
+                [protocol.op_window(
+                    {"maximizeRequestable": requestable}, session=self._session
+                )]
             )
 
     def on_return_request(self, callback: Callable[..., None] | None) -> None:
@@ -394,7 +398,9 @@ class Window(Widget):
         # 必须立刻 flush：configure() 走 16ms 合并窗口，
         # 紧接着的 render()/事件循环会让隐藏晚一帧，看起来像没生效。
         if self._app is not None and self._app._host is not None:
-            self._app._send_patch([protocol.op_window({key: False})])
+            self._app._send_patch(
+                [protocol.op_window({key: False}, session=self._session)]
+            )
             self._app._flush_patches()
 
     def _on_event(self, event: Any) -> None:

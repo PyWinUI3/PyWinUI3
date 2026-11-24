@@ -67,6 +67,10 @@ class Widget:
 
     def __init__(self, master: Any, **kwargs: Any):
         self._app = master._app
+        # 控件属于 master 所在的会话（Window 及其后代都带 _session）。
+        # 少了这行，_register_node 会把所有普通控件登记成 main：子窗口里
+        # 的控件补丁打到主窗口，关窗时节点也不会跟着会话一起清理。
+        self._session: str = getattr(master, "_session", "main")
         self._id: str = self._app._alloc_node_id()
         self._parent: Any = master
         self._children: list[Widget] = []
@@ -1463,6 +1467,34 @@ class WebView2(Widget):
         self._app._send_invoke(
             self._id,
             "respond_permission",
+            {"requestId": str(request_id), "allow": bool(allow)},
+        )
+
+    # ---- 证书错误：默认拒绝，可选逐次放行 ----
+
+    def on_certificate_error(self, handler: Callable[..., Any]) -> str:
+        """TLS 证书无效时触发（自签名、过期、域名不符等）。
+
+        宿主**默认拒绝**并显示 WebView2 的错误页，同时会把原因作为一条
+        warning 发给 Python（默认打到 stderr，或用 ``App(on_warning=...)``
+        收集）。挂了这个回调后，``e.data`` 含 ``requestId`` / ``url`` /
+        ``errorStatus``，用 :meth:`respond_certificate_error` 逐次决定是否放行::
+
+            def trust(e):
+                if e.data["url"].startswith("https://intranet/"):
+                    web.respond_certificate_error(e.data["requestId"], True)
+
+            web.on_certificate_error(trust)
+
+        8 秒不回执按拒绝处理。放行只对该主机 + 证书生效，不是全局关闭校验。
+        """
+        return self.bind("certificateError", handler)
+
+    def respond_certificate_error(self, request_id: str, allow: bool) -> None:
+        """放行或拒绝一次证书错误；``allow=True`` 仅影响该请求的主机与证书。"""
+        self._app._send_invoke(
+            self._id,
+            "respond_certificate_error",
             {"requestId": str(request_id), "allow": bool(allow)},
         )
 

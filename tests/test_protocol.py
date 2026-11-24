@@ -133,7 +133,15 @@ class TestPatchOps(unittest.TestCase):
         )
 
     def test_op_window(self):
-        self.assertEqual(protocol.op_window({"title": "X"}), {"t": "window", "props": {"title": "X"}})
+        self.assertEqual(
+            protocol.op_window({"title": "X"}),
+            {"t": "window", "props": {"title": "X"}, "_session": "main"},
+        )
+        # window op 必须带会话：它没有节点 id，无法在合并阶段从节点表推断，
+        # 子窗口的改动若归到 main 就会改到主窗口标题。
+        self.assertEqual(
+            protocol.op_window({"title": "子"}, session="w1")["_session"], "w1"
+        )
 
 
 class TestNodeBuilder(unittest.TestCase):

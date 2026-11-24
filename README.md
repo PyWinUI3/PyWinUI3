@@ -1105,8 +1105,11 @@ viewport = ui.Viewport3D(
   `ItemsView` 近似，后者需要自己接 `SwapChainPanel` + DirectX。
 - **WebView2 依赖系统运行时**。只覆盖「运行时未安装」这一种失败；运行时存在但初始化失败
   （安装损坏）时该区域仍可能空白。`navigate_to_string()` 的页面没有真实地址。
-  证书错误已放行（`--ignore-certificate-errors`）；`addHostObjectToScript` / HTTP 认证
-  尚未实现。权限请求和资源拦截都是可选挂接
+  证书错误**默认拒绝**并显示 WebView2 的 TLS 错误页，同时以 warning 回报 Python；
+  确需访问自签名/内网 HTTPS 时，用 `web.on_certificate_error(cb)` 挂回调，在回调里
+  按 `e.data["requestId"]` 调 `web.respond_certificate_error(rid, True)` 逐次放行
+  （8 秒不回执按拒绝，放行仅对该主机+证书生效，不是全局关闭校验）。
+  `addHostObjectToScript` / HTTP 认证尚未实现。权限请求和资源拦截都是可选挂接
   （不挂就走默认）；`window.open()` 不挂回调时在当前视图打开目标地址（框架本身的多窗口
   见 6.11 节）；WinUI 3 不暴露程序化 `zoomFactor`。
 

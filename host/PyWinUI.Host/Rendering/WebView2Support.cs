@@ -35,7 +35,7 @@ internal static class WebView2Support
     {
         "webMessage", "contentLoading", "domContentLoaded", "processFailed",
         "newWindowRequested", "downloadStarting", "downloadProgress", "downloadStateChanged",
-        "permissionRequested", "webResourceRequested",
+        "permissionRequested", "webResourceRequested", "certificateError",
     };
 
     private sealed class State
@@ -43,13 +43,27 @@ internal static class WebView2Support
         public WebView2 Web = null!;
         public string NodeId = "";
         public Action<string, string, JsonObject?, bool> Emit = null!;
+        public Action<string> Warn = null!;
         public readonly HashSet<string> Events = new(StringComparer.Ordinal);
         public readonly Dictionary<string, JsonNode?> Pending = new(StringComparer.Ordinal);
         public readonly Dictionary<string, NewWindowRequest> Windows = new(StringComparer.Ordinal);
         public readonly Dictionary<string, DownloadEntry> Downloads = new(StringComparer.Ordinal);
         public readonly Dictionary<string, PermissionRequest> Permissions = new(StringComparer.Ordinal);
         public readonly Dictionary<string, ResourceRequest> Resources = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, CertificateErrorRequest> Certificates = new(StringComparer.Ordinal);
         public bool CoreWired;
+    }
+
+    /// <summary>
+    /// 一次证书错误请求的 deferral。和权限/新窗口一样，把决定权交给 Python：
+    /// 默认显示 WebView2 的 TLS 错误页，只有显式回执 allow 才放行。
+    /// </summary>
+    private sealed class CertificateErrorRequest
+    {
+        public WebView2 Web = null!;
+        public CoreWebView2ServerCertificateErrorDetectedEventArgs Args = null!;
+        public Deferral Deferral = null!;
+        public DispatcherTimer? Timer;
     }
 
     private sealed class NewWindowRequest
@@ -96,12 +110,17 @@ internal static class WebView2Support
 
     public static bool IsCoreEvent(string name) => CoreEventNames.Contains(name);
 
-    public static void Attach(WebView2 web, string nodeId, Action<string, string, JsonObject?, bool> emit)
+    public static void Attach(
+        WebView2 web,
+        string nodeId,
+        Action<string, string, JsonObject?, bool> emit,
+        Action<string> warn)
     {
         var state = States.GetOrCreateValue(web);
         state.Web = web;
         state.NodeId = nodeId;
         state.Emit = emit;
+        state.Warn = warn;
 
         if (state.CoreWired)
         {
@@ -199,6 +218,9 @@ internal static class WebView2Support
         core.DownloadStarting += (_, e) => OnDownloadStarting(web, state, e);
         core.PermissionRequested += (_, e) => OnPermissionRequested(web, state, e);
         core.WebResourceRequested += (_, e) => OnWebResourceRequested(web, state, e);
+        // 证书错误默认显示 WebView2 的错误页；Python 可订阅 certificateError
+        // 事件后按请求回执 allow，实现「可选的逐次放行」而不是全局关闭校验。
+        core.ServerCertificateErrorDetected += (_, e) => OnCertificateError(web, state, e);
     }
 
     private static void Emit(State state, string eventName, JsonObject data)
@@ -501,6 +523,108 @@ internal static class WebView2Support
             finally
             {
                 entry.Deferral.Complete();
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // 证书错误：默认拒绝，Python 逐次可选放行
+    // ------------------------------------------------------------------
+
+    private static void OnCertificateError(
+        WebView2 web,
+        State state,
+        CoreWebView2ServerCertificateErrorDetectedEventArgs args)
+    {
+        // 必须同步调用 GetDeferral，否则事件处理返回后 WebView2 立即按默认行为
+        // 显示 TLS 错误页，Python 还没收到告警就已经定性了。
+        var deferral = args.GetDeferral();
+        var id = NextId("cert");
+        var entry = new CertificateErrorRequest
+        {
+            Web = web,
+            Args = args,
+            Deferral = deferral,
+        };
+        state.Certificates[id] = entry;
+
+        var url = args.RequestUri ?? "";
+        var error = args.ErrorStatus.ToString();
+
+        // 无论有没有订阅事件，都先给一条告警——证书问题不能静默吞掉。
+        // 这是替代「全局 --ignore-certificate-errors」的关键：默认拒绝 +
+        // 可见告警，放行要显式回执。
+        OnUi(web, () =>
+        {
+            state.Warn($"WebView2 证书错误 [{error}] {url}：" +
+                       "默认已拒绝并显示错误页；如确认可信，可绑定 certificateError " +
+                       $"事件后用 respond_certificate_error(\"{id}\", True) 放行");
+
+            if (!state.Events.Contains("certificateError"))
+            {
+                // 没订阅：保留 WebView2 默认行为（显示 TLS 错误页）
+                CompleteCertificate(web, id, null);
+                return;
+            }
+
+            Emit(state, "certificateError", new JsonObject
+            {
+                ["requestId"] = id,
+                ["url"] = url,
+                ["errorStatus"] = error,
+            });
+
+            // 8 秒没回执：保持默认拒绝，不让 deferral 永远挂着
+            entry.Timer = OneShot(
+                TimeSpan.FromSeconds(8),
+                () => CompleteCertificate(web, id, null));
+        });
+    }
+
+    /// <summary>allow=true 放行这一次证书错误；false/null 保持默认拒绝。</summary>
+    public static void RespondCertificateError(WebView2 web, string id, bool allow)
+    {
+        if (!States.TryGetValue(web, out var state)
+            || !state.Certificates.TryGetValue(id, out var entry))
+        {
+            return;
+        }
+
+        state.Certificates.Remove(id);
+        entry.Timer?.Stop();
+        CompleteCertificate(web, id, allow, entry);
+    }
+
+    private static void CompleteCertificate(
+        WebView2 web, string id, bool? allow, CertificateErrorRequest? entry = null)
+    {
+        // 先取到 entry 再移除，不能像「先 Remove 再查」那样写——那样第二次
+        // 查不到，deferral 就永远挂着，页面会卡在加载态。
+        var request = entry;
+        if (request is null)
+        {
+            if (!States.TryGetValue(web, out var s)
+                || !s.Certificates.TryGetValue(id, out request))
+            {
+                return;
+            }
+            s.Certificates.Remove(id);
+        }
+
+        var captured = request;
+        OnUi(web, () =>
+        {
+            try
+            {
+                if (allow == true)
+                {
+                    captured.Args.Action = CoreWebView2ServerCertificateErrorAction.AlwaysAllow;
+                }
+                // null / false：不设置 Action，保留 WebView2 默认的 TLS 错误页
+            }
+            finally
+            {
+                captured.Deferral.Complete();
             }
         });
     }

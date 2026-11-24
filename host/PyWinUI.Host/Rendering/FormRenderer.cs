@@ -218,7 +218,7 @@ internal sealed class FormRenderer
             _specs[spec.Id] = spec;
             if (created is WebView2 webNode)
             {
-                WebView2Support.Attach(webNode, spec.Id, _emit);
+                WebView2Support.Attach(webNode, spec.Id, _emit, _warn);
             }
         }
 
@@ -1372,7 +1372,7 @@ internal sealed class FormRenderer
         _specs[spec.Id] = spec;
         if (element is WebView2 insertedWeb)
         {
-            WebView2Support.Attach(insertedWeb, spec.Id, _emit);
+            WebView2Support.Attach(insertedWeb, spec.Id, _emit, _warn);
         }
 
         ApplyPropsSuppressed(spec.Id, element, spec.Props);

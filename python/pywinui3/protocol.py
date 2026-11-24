@@ -233,8 +233,16 @@ def op_move(node_id: str, parent: str, index: int) -> dict[str, Any]:
     return {"t": "move", "id": node_id, "parent": parent, "index": index}
 
 
-def op_window(props: dict[str, Any]) -> dict[str, Any]:
-    return {"t": "window", "props": props}
+def op_window(
+    props: dict[str, Any], session: str = "main"
+) -> dict[str, Any]:
+    """窗口级属性 op。
+
+    ``_session`` 是内部键（宿主忽略、flush 时据此分组）：window op 没有
+    节点 id，无法像 set 那样从节点表推断会话，因此必须由调用方显式带上。
+    否则子窗口改标题会被归到 main，同一帧两个窗口的改动还会并成一条。
+    """
+    return {"t": "window", "props": props, "_session": session}
 
 
 # --------------------------------------------------------------------------

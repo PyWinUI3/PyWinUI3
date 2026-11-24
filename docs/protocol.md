@@ -1165,8 +1165,12 @@ Python 真的 `bind()` 了对应事件名才往管道推；设置属性如果来
 
 **诚实限制**：
 
-- 证书错误通过启动参数 `--ignore-certificate-errors` 放行（自定义
-  `CoreWebView2Environment`，进程级缓存）；**HTTP 认证仍未实现**；
+- 证书错误**默认拒绝**并保留 WebView2 的 TLS 错误页，同时以 `t="warning"` 回报
+  Python（含 `errorStatus` / `url` / `requestId`）。要从 Python 放行某一请求，
+  先 `bind("certificateError", cb)`（`e.data` 含 `requestId` / `url` /
+  `errorStatus`），再 `invoke("respond_certificate_error", {requestId, allow:true})`；
+  8 秒无回执按拒绝处理，`AlwaysAllow` 只对那一个主机+证书生效，不是全局关闭校验。
+  **HTTP 认证仍未实现**；
 - WinUI 3 的 WebView2 投影没有暴露 `CoreWebView2Controller`，因此**不提供程序化
   `zoomFactor`**，只有 `isZoomControlEnabled` 控制用户 Ctrl+滚轮缩放；
 - `addHostObjectToScript`、完整多窗口仍未实现（见第 8 章）。
