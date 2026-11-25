@@ -105,11 +105,17 @@ jobs:
         run: |
           PREFIX="本版本由 CI/CD 自动构建。"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --generate-notes
+            # rc / beta 等 v* tag 都是预发布，标成正式版会让 pip 用户误装到
+            # 测试版（GitHub 也会把它放进「最新发布」）。
+            gh release create "$TAG" --title "$TAG" --generate-notes --prerelease
           fi
           body="$(gh release view "$TAG" --json body -q .body)"
+          new_body="$body"
           case "$body" in
             "$PREFIX"*) ;;  # 已有前缀，不重复添加
-            *) gh release edit "$TAG" --notes "$(printf '%s\n\n%s' "$PREFIX" "$body")" ;;
+            *) new_body="$(printf '%s\n\n%s' "$PREFIX" "$body")" ;;
           esac
+          # 无论新建还是已存在，都强制标记为预发布：重推同名 tag 时
+          # create 分支不会走，必须靠 edit 才能修正历史遗留的正式版标记。
+          gh release edit "$TAG" --notes "$new_body" --prerelease
           gh release upload "$TAG" dist/*.whl --clobber
